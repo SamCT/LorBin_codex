@@ -16,6 +16,7 @@ setup(name='LorBin',
       zip_safe=False,
       entry_points={
           'console_scripts': ['LorBin=lorbin.lorbin:main',
+                           'LorBin-compare-preprocessing=lorbin.compare_preprocessing:main',
                                 ],
       }
 )
