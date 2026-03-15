@@ -10,34 +10,41 @@ def calculate_coverage(depth_stream, bam_file, edge=75,contig_threshold=1000):
 
     """
     import pandas as pd
-    import numpy as np
     from itertools import groupby
 
     contigs = []
     mean_coverage = []
 
     for contig_name, lines in groupby(depth_stream, lambda ell: ell.split('\t', 1)[0]):
-        lengths = []
-        values = []
+        segments = []
+        contig_end = 0
         for line in lines:
             line_split = line.strip().split('\t')
-            length = int(line_split[2]) - int(line_split[1])
-            value = int(float(line_split[3]))
-            lengths.append(length)
-            values.append(value)
-        depth_value = np.zeros(sum(lengths), dtype=int)
-        s = 0
-        for ell,v in zip(lengths, values):
-            depth_value[s:s+ell] = v
-            s += ell
+            start = int(line_split[1])
+            end = int(line_split[2])
+            depth = int(float(line_split[3]))
+            segments.append((start, end, depth))
+            if end > contig_end:
+                contig_end = end
 
-        cov_threshold = contig_threshold
-        if len(depth_value) < cov_threshold:
+        trimmed_start = edge
+        trimmed_end = max(trimmed_start, contig_end - edge)
+        trimmed_len = trimmed_end - trimmed_start
+        if contig_end < contig_threshold:
             continue
-        depth_value_ = depth_value[edge:-edge]
-        mean_coverage.append(depth_value_.mean())
-        contigs.append(contig_name)
 
+        weighted_depth_sum = 0
+        for start, end, depth in segments:
+            overlap_start = max(start, trimmed_start)
+            overlap_end = min(end, trimmed_end)
+            if overlap_end > overlap_start:
+                weighted_depth_sum += (overlap_end - overlap_start) * depth
+
+        if trimmed_len > 0:
+            mean_coverage.append(weighted_depth_sum / trimmed_len)
+        else:
+            mean_coverage.append(float('nan'))
+        contigs.append(contig_name)
 
     contig_cov = pd.DataFrame(
             { '{0}_cov'.format(bam_file): mean_coverage,
@@ -54,7 +61,6 @@ def generate_cov(bam_file, bam_index, out, logger, contig_threshold=1000):
     threshold: threshold of contigs that will be binned
     sep: separator for multi-sample binning
     """
-    import numpy as np
     logger.debug('Processing `{}`'.format(bam_file))
     bam_name = os.path.split(bam_file)[-1] + '_{}'.format(bam_index)
 
@@ -97,4 +103,3 @@ def combine_cov(cov_dir, bam_list):
                             left_index=True, right_index=True, sort=False, copy=True)
 
     return data_cov
-
