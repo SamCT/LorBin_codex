@@ -130,24 +130,25 @@ def load_depth_lines(bam=None, depth_bga=None):
     return completed.stdout.splitlines(keepends=True)
 
 
-def run_original_preprocessing(fasta, depth_lines, bam_label):
-    kmer, length = old_generate_kmer_features_from_fasta(fasta)
-    cov = old_calculate_coverage(iter(depth_lines), bam_label)
-    return kmer, length, cov
-
-
-def run_optimized_preprocessing(fasta, depth_lines, bam_label):
-    kmer, length = generate_kmer_features_from_fasta(fasta)
-    cov = calculate_coverage(iter(depth_lines), bam_label)
-    return kmer, length, cov
-
-
-def run_compare(fasta, output_dir, bam=None, depth_bga=None, method="both"):
+def run_compare(fasta, output_dir, bam=None, depth_bga=None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    old_kmer, old_len = old_generate_kmer_features_from_fasta(fasta)
+    new_kmer, new_len = generate_kmer_features_from_fasta(fasta)
+
     depth_lines = load_depth_lines(bam=bam, depth_bga=depth_bga)
     bam_label = bam if bam else "depth_bga_input"
+    old_cov = old_calculate_coverage(iter(depth_lines), bam_label)
+    new_cov = calculate_coverage(iter(depth_lines), bam_label)
+
+    old_kmer.to_csv(output_path / "kmer_old.csv")
+    new_kmer.to_csv(output_path / "kmer_new.csv")
+    old_len.to_csv(output_path / "length_old.csv")
+    new_len.to_csv(output_path / "length_new.csv")
+    old_cov.to_csv(output_path / "coverage_old.csv")
+    new_cov.to_csv(output_path / "coverage_new.csv")
+
     summary = {
         "parameters": {
             "fasta": str(fasta),
@@ -157,32 +158,13 @@ def run_compare(fasta, output_dir, bam=None, depth_bga=None, method="both"):
             "contig_threshold": DEFAULT_CONTIG_THRESHOLD,
             "length_threshold": DEFAULT_LENGTH_THRESHOLD,
             "kmer_len": DEFAULT_KMER_LEN,
-            "method": method,
         },
-        "comparisons": [],
-    }
-
-    old_kmer = old_len = old_cov = None
-    new_kmer = new_len = new_cov = None
-
-    if method in {"original", "both"}:
-        old_kmer, old_len, old_cov = run_original_preprocessing(fasta, depth_lines, bam_label)
-        old_kmer.to_csv(output_path / "kmer_original.csv")
-        old_len.to_csv(output_path / "length_original.csv")
-        old_cov.to_csv(output_path / "coverage_original.csv")
-
-    if method in {"optimized", "both"}:
-        new_kmer, new_len, new_cov = run_optimized_preprocessing(fasta, depth_lines, bam_label)
-        new_kmer.to_csv(output_path / "kmer_optimized.csv")
-        new_len.to_csv(output_path / "length_optimized.csv")
-        new_cov.to_csv(output_path / "coverage_optimized.csv")
-
-    if method == "both":
-        summary["comparisons"] = [
+        "comparisons": [
             compare_frames(old_kmer, new_kmer, "kmer"),
             compare_frames(old_len, new_len, "length"),
             compare_frames(old_cov, new_cov, "coverage"),
-        ]
+        ],
+    }
 
     (output_path / "comparison_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
@@ -190,18 +172,12 @@ def run_compare(fasta, output_dir, bam=None, depth_bga=None, method="both"):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run original and/or optimized LorBin preprocessing and compare outputs."
+        description="Compare default LorBin preprocessing outputs before and after optimization."
     )
     parser.add_argument("--fasta", required=True, help="Input FASTA file")
     parser.add_argument("--output", required=True, help="Output directory for comparison artifacts")
     parser.add_argument("--bam", default=None, help="Input BAM file; used to call bedtools genomecov -bga")
     parser.add_argument("--depth-bga", default=None, help="Optional precomputed bedtools genomecov -bga output")
-    parser.add_argument(
-        "--method",
-        choices=["original", "optimized", "both"],
-        default="both",
-        help="Which preprocessing implementation(s) to run",
-    )
     args = parser.parse_args()
 
     if not args.bam and not args.depth_bga:
@@ -217,7 +193,6 @@ def main():
         output_dir=args.output,
         bam=args.bam,
         depth_bga=args.depth_bga,
-        method=args.method,
     )
 
     print(json.dumps(summary, indent=2))
