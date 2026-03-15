@@ -33,10 +33,14 @@ def generate_kmer_features_from_fasta(
             continue
         seq_len[h] = len(seq)
         norm_seq = str(seq).upper()
-        kmers = [kmer_dict[norm_seq[i:i+kmer_len]]
-                for i in range(len(norm_seq) - kmer_len + 1)
-                if norm_seq[i:i+kmer_len] in kmer_dict] # ignore kmers with non-canonical bases
-        composition[h] = np.bincount(np.array(kmers, dtype=np.int64), minlength=nr_features)
+        counts = np.zeros(nr_features, dtype=np.int64)
+        limit = len(norm_seq) - kmer_len + 1
+        for i in range(limit):
+            kmer = norm_seq[i:i+kmer_len]
+            kmer_index = kmer_dict.get(kmer)
+            if kmer_index is not None:  # ignore kmers with non-canonical bases
+                counts[kmer_index] += 1
+        composition[h] = counts
     df = pd.DataFrame.from_dict(composition, orient='index', dtype=float)
 
     df = df.apply(lambda x: x + 1e-5)

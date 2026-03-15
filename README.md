@@ -99,7 +99,11 @@ LorBin bin -o outputdir -fa test.fna -b test1.mapped.sorted.bam test2.mapped.sor
 ```
 If you only want to use LorBin in single mode,
 ```angular2html
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl optimized
+```
+To run the original clustering implementation for side-by-side benchmarking, use:
+```angular2html
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl original
 ```
 ```angular2html
 usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
@@ -121,6 +125,8 @@ options:
   -a AKEEP, --akeep AKEEP
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
+  --cluster_impl {optimized,original}
+                        Choose optimized clustering (faster) or original clustering
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -185,6 +191,8 @@ options:
   -a AKEEP, --akeep AKEEP
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
+  --cluster_impl {optimized,original}
+                        Choose optimized clustering (faster) or original clustering
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --num_process NUM_PROCESS
