@@ -105,7 +105,22 @@ def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transforme
 
 
 
-def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6):
+def _prune_resultpool_original(resultpool, selected_contigs):
+    for temp in selected_contigs:
+        for result in resultpool:
+            while temp in result:
+                result.remove(temp)
+
+
+def _prune_resultpool_optimized(resultpool, selected_contigs):
+    to_remove = set(selected_contigs)
+    for i, result in enumerate(resultpool):
+        if result:
+            resultpool[i] = [idx for idx in result if idx not in to_remove]
+
+def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized"):
+    use_optimized = cluster_impl == "optimized"
+
     result_dict = {}
     # create BIRCH
     min_k_1 = min(200, latent.shape[0] - 1)
@@ -238,10 +253,10 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             keep_count+=1
         all_extracted.append(max_bin.copy())
         keep_label.append(keep)
-        for temp in max_bin.copy():
-            for i, result in enumerate(resultpool):
-                while temp in result:
-                    result.remove(temp)
+        if use_optimized:
+            _prune_resultpool_optimized(resultpool, max_bin.copy())
+        else:
+            _prune_resultpool_original(resultpool, max_bin.copy())
 
     contig2ix = {}
     label_index=0
@@ -321,10 +336,13 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         max_bin, keep = max_bin
 
         extracted.append(max_bin.copy())
-        for temp in max_bin.copy():
-            for i in range(len(resultpool)):
-                if temp in set(resultpool[i]):
-                    resultpool[i].remove(temp)
+        if use_optimized:
+            _prune_resultpool_optimized(resultpool, max_bin.copy())
+        else:
+            for temp in max_bin.copy():
+                for i in range(len(resultpool)):
+                    if temp in set(resultpool[i]):
+                        resultpool[i].remove(temp)
     contig2ix = {}
     for i, cs in enumerate(extracted):
         for c in cs:
