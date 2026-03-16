@@ -166,17 +166,21 @@ def _connected_components_from_adjacency(adj):
     return components
 
 
-def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=12000):
+def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=12000, cuda_fallback=True):
     if not torch.cuda.is_available():
-        logger.warning("recluster_impl=cuda requested but CUDA is unavailable; falling back to optimized CPU recluster")
-        return None
+        msg = "recluster_impl=cuda requested but CUDA is unavailable"
+        if cuda_fallback:
+            logger.warning(f"{msg}; falling back to optimized CPU recluster")
+            return None
+        raise RuntimeError(msg)
 
     n_points = recluster_latent.shape[0]
     if n_points > max_cuda_points:
-        logger.warning(
-            f"recluster_impl=cuda requested but {n_points} points exceed max_cuda_points={max_cuda_points}; falling back to optimized CPU recluster"
-        )
-        return None
+        msg = f"recluster_impl=cuda requested but {n_points} points exceed max_cuda_points={max_cuda_points}"
+        if cuda_fallback:
+            logger.warning(f"{msg}; falling back to optimized CPU recluster")
+            return None
+        raise RuntimeError(msg)
 
     latent_tensor = torch.as_tensor(recluster_latent, dtype=torch.float32, device='cuda')
     with torch.no_grad():
@@ -198,7 +202,13 @@ def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresh
     unique_resultpool = set(map(tuple, resultpool))
     return list(map(list, unique_resultpool))
 
-def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original"):
+def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
+    # Defensive normalization keeps runtime robust even under partially updated installs.
+    if max_cuda_points is None:
+        max_cuda_points = 12000
+    if cuda_fallback is None:
+        cuda_fallback = True
+
     use_optimized = cluster_impl == "optimized"
     use_recluster_optimized = recluster_impl in {"optimized", "cuda"}
 
@@ -379,8 +389,8 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         mode='distance',
         p=2,
         n_jobs=10)
-
-
+    if sort_graph_by_row_values is not None:
+        dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
 
     p2_distance = dist_matrix.data
     eps_p2_2=[]
@@ -402,9 +412,18 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     threds.sort()
 
     if recluster_impl == "cuda":
-        resultpool = _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, threds)
-        if resultpool is None:
+        cuda_resultpool = _build_recluster_pool_cuda(
+            logger,
+            recluster_latent,
+            recluster_index,
+            threds,
+            max_cuda_points=max_cuda_points,
+            cuda_fallback=cuda_fallback,
+        )
+        if cuda_resultpool is None:
             recluster_impl = "optimized"
+        else:
+            resultpool = cuda_resultpool
     if recluster_impl != "cuda":
         for thred in threds:
             if thred<0.00001:
