@@ -99,11 +99,21 @@ LorBin bin -o outputdir -fa test.fna -b test1.mapped.sorted.bam test2.mapped.sor
 ```
 If you only want to use LorBin in single mode,
 ```angular2html
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl optimized
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+
+# experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
 ```
-To run the original clustering implementation for side-by-side benchmarking, use:
+To run side-by-side benchmarks with stage-specific switches:
 ```angular2html
+# keep default recluster (original), tune stage-1 clustering
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl original
+
+# keep stage-1 default, enable optimized reclustering
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+
+# experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
 ```
 ```angular2html
 usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
@@ -126,7 +136,9 @@ options:
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
-                        Choose optimized clustering (faster) or original clustering
+                        Stage-1 clustering implementation to run (default: optimized)
+  --recluster_impl {optimized,original,cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -192,7 +204,9 @@ options:
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
-                        Choose optimized clustering (faster) or original clustering
+                        Stage-1 clustering implementation to run (default: optimized)
+  --recluster_impl {optimized,original,cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --num_process NUM_PROCESS
