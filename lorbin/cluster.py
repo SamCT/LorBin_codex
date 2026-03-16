@@ -3,6 +3,10 @@ import pandas as pd
 import torch
 from Bio import SeqIO
 from sklearn.neighbors import kneighbors_graph
+try:
+    from sklearn.neighbors import sort_graph_by_row_values
+except ImportError:
+    sort_graph_by_row_values = None
 import math
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from .utils import get_marker, process_fasta
@@ -205,6 +209,9 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         p=2,
         n_jobs=10)
 
+    if sort_graph_by_row_values is not None:
+        dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
+        dist_matrix_cos = sort_graph_by_row_values(dist_matrix_cos, warn_when_not_sorted=False)
 
     cos_distance_data = dist_matrix_cos.data
     p2_distance_data = dist_matrix.data
