@@ -14,8 +14,18 @@ from .model.KeepModel import KeepModel
 from .model.EvaluationModel import EvaluationModel
 import numpy as np
 from sklearn.cluster import Birch, DBSCAN
+from sklearn.exceptions import EfficiencyWarning
 import logging
 import os
+import warnings
+
+# Some sklearn versions may still emit sparse precomputed sorting warnings from internal checks.
+warnings.filterwarnings(
+    "ignore",
+    category=EfficiencyWarning,
+    message="Precomputed sparse input was not sorted by row values.*",
+)
+
 
 
 
@@ -352,6 +362,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         label_index=i+1
     contig_labels_ = [contig2ix_.get(c, -1) for c in contig_all]
     logger.info('start recluster')
+    logger.info(f"recluster config: impl={recluster_impl}, max_cuda_points={max_cuda_points}, cuda_fallback={cuda_fallback}")
     recluster_index = [index for index, value in enumerate(contig_labels) if value == -1]
     if len(recluster_index) <= 1:
         return contig_labels,keep_label

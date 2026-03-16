@@ -227,6 +227,17 @@ def parser_args():
     args = parser.parse_args()
     return args
 
+
+
+def _log_runtime_details(logger, args):
+    logger.info(f"LorBin runtime module: {__file__}")
+    logger.info(
+        f"runtime args: cluster_impl={getattr(args, 'cluster_impl', None)}, "
+        f"recluster_impl={getattr(args, 'recluster_impl', None)}, "
+        f"max_cuda_points={getattr(args, 'max_cuda_points', None)}, "
+        f"disable_cuda_fallback={getattr(args, 'disable_cuda_fallback', None)}"
+    )
+
 def main():
     args=parser_args()
     logger = logging.getLogger('LorBin')
@@ -237,6 +248,7 @@ def main():
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") # Create a Handler object to control where the log is output
         file_handler.setFormatter(formatter) 
         logger.addHandler(file_handler)
+        _log_runtime_details(logger, args)
         generate_data(logger, args.fasta, args.bam, args.output, args.num_process)
         generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
         train_vae(logger,args.output, epoch=args.epoch)
@@ -263,6 +275,7 @@ def main():
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
         logger.addHandler(file_handler)
         file_handler.setFormatter(formatter)
+        _log_runtime_details(logger, args)
         generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
         embeddingdir = args.embeddingdir
         if args.embeddingdir==None:
