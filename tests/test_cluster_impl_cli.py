@@ -84,3 +84,13 @@ def test_bin_recluster_impl_cuda(monkeypatch):
     )
     args = parser_args()
     assert args.recluster_impl == "cuda"
+
+
+def test_cli_version_flag(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["LorBin", "--version"])
+    try:
+        parser_args()
+    except SystemExit as exc:
+        assert exc.code == 0
+    out = capsys.readouterr().out
+    assert "LorBin 0.1.1" in out
