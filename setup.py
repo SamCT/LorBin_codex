@@ -4,7 +4,7 @@ from setuptools import setup
 long_description = open('README.md', encoding='utf-8').read()
 
 setup(name='LorBin',
-      version='0.1.1',
+      version='0.1.3',
       python_requires='>=3.10',
       long_description = long_description,
       long_description_content_type = 'text/markdown',

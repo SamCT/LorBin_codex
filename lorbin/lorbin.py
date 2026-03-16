@@ -80,7 +80,7 @@ def train_vae(logger, outdir, batch_size=64, epoch=300, batchsteps=[25],  lrate=
     latent = model.get_latent(testdataloader)
     pd.DataFrame(latent,index=df.index).to_csv(f'{outdir}/embedding.csv')
 
-def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original"):
+def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
     df = pd.read_csv(embeddingdir,index_col=0)
     names = df.index
     contig_all = names
@@ -95,7 +95,7 @@ def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster
     contig_dict = utils.process_fasta(fastadir)
     if bin_length <= 0:
         bin_length = 50  # 直接设置合理默认值
-    labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl)
+    labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
     pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label.csv')
     write_bin(contig_all, labels,contig_dict,f"{outdir}/output_bins",bin_length)
 # 临时定义，避免 NameError
@@ -103,7 +103,7 @@ def generate_cluster(*args, **kwargs):
     # 返回 False 继续程序，返回 True 则会触发 sys.exit()
     return False
 
-def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original"):
+def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
     if generate_cluster(logger, outdir, fastadir, embeddingdir):
         sys.exit()
     df = pd.read_csv(embeddingdir,index_col=0)
@@ -121,7 +121,7 @@ def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, clus
     embedding = df.values
     for i in range(len(nsample)-1):
         latent = embedding[nsample[i]:nsample[i+1]]
-        labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl)
+        labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
         pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label_{samplename[i]}.csv')
         write_bin(contig_all, labels,contig_dict,f"{output}/output_bins_{samplename[i]}",bin_length)
 
@@ -190,6 +190,10 @@ def parser_args():
                       help='Stage-1 clustering implementation to run (default: optimized)')
         p.add_argument('--recluster_impl', choices=['optimized', 'original', 'cuda'], default='original',
                       help='Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)')
+        p.add_argument('--max_cuda_points', type=int, default=12000,
+                      help='Max contigs for CUDA recluster distance matrix (default: 12000)')
+        p.add_argument('--disable_cuda_fallback', action='store_true', default=False,
+                      help='If set with --recluster_impl cuda, fail instead of falling back to CPU recluster')
     # ===== add training args for bin mode =====
     bin_mode.add_argument('--epoch','-n', type=int, default=300,
                         help='training epoch (default: 300)')
@@ -256,10 +260,12 @@ def main():
         generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
         train_vae(logger,args.output, epoch=args.epoch)
         embeddingdir = f"{args.output}/embedding.csv"
+        max_cuda_points = getattr(args, "max_cuda_points", 12000)
+        cuda_fallback = not getattr(args, "disable_cuda_fallback", False)
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl, args.recluster_impl)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
     elif args.cmd=='generate_data':
         if not check_generate_data(logger, args.fasta, args.bam, args.output):sys.exit()
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
@@ -284,10 +290,12 @@ def main():
         if args.embeddingdir==None:
             train_vae(logger, args.output,  args.batch_size, args.epoch, args.batchsteps, args.lrate, args.cuda, args.data)
             embeddingdir = f'{args.output}/embedding.csv'
+        max_cuda_points = getattr(args, "max_cuda_points", 12000)
+        cuda_fallback = not getattr(args, "disable_cuda_fallback", False)
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
     elif args.cmd=='concat':
         concat(args.output,args.fasta)
     else:
