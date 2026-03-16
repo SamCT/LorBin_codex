@@ -143,101 +143,64 @@ def _prune_resultpool_optimized(resultpool, selected_contigs):
 def _get_total_bp(contig_names, contig_dict):
     return sum(len(contig_dict[name]) for name in contig_names)
 
-def _build_recluster_thresholds_from_distances(distance_data, n_rows, min_k_2):
-    eps_p2_2 = []
-    for k in range(5, min(80, min_k_2), 10):
-        idx = n_rows * k - 1
-        if idx < 0 or idx >= len(distance_data):
+
+def _connected_components_from_adjacency(adj):
+    n = adj.shape[0]
+    seen = np.zeros(n, dtype=bool)
+    components = []
+    for i in range(n):
+        if seen[i]:
             continue
-        eps_value = np.partition(distance_data, idx)[idx]
-        eps_p2_2.append(math.floor(0.8 * eps_value))
-        eps_p2_2.append(math.floor(eps_value))
-        eps_p2_2.append(math.floor(1.2 * eps_value))
-
-    eps_p2_2 = sorted(set(eps_p2_2))
-    if not eps_p2_2:
-        return []
-
-    threds = eps_p2_2 + [0.1 * eps_p2_2[0], 0.3 * eps_p2_2[0], 0.5 * eps_p2_2[0], 10, 15, 30]
-    threds = sorted(set(t for t in threds if t >= 0.00001))
-    return threds
-
-
-def _build_recluster_resultpool_cpu(recluster_latent, recluster_index, min_k_2):
-    dist_matrix = kneighbors_graph(
-        recluster_latent,
-        n_neighbors=min_k_2,
-        mode='distance',
-        p=2,
-        n_jobs=10,
-    )
-    if sort_graph_by_row_values is not None:
-        dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
-
-    threds = _build_recluster_thresholds_from_distances(dist_matrix.data, recluster_latent.shape[0], min_k_2)
-    if not threds:
-        return []
-
-    resultpool = []
-    for thred in threds:
-        birch = Birch(threshold=thred, n_clusters=None)
-        labels = birch.fit_predict(recluster_latent)
-
-        res_temp = defaultdict(list)
-        for label, name_index in zip(labels, recluster_index):
-            if label != -1:
-                res_temp[label].append(name_index)
-        resultpool.extend(res_temp.values())
-
-    unique_resultpool = set(map(tuple, resultpool))
-    return list(map(list, unique_resultpool))
+        stack = [i]
+        seen[i] = True
+        comp = []
+        while stack:
+            node = stack.pop()
+            comp.append(node)
+            neighbors = np.flatnonzero(adj[node])
+            for nb in neighbors:
+                if not seen[nb]:
+                    seen[nb] = True
+                    stack.append(nb)
+        components.append(comp)
+    return components
 
 
-def _build_recluster_resultpool_cuda(recluster_latent, recluster_index, min_k_2):
-    try:
-        import cupy as cp
-        from cuml.neighbors import NearestNeighbors as CuNearestNeighbors
-        from cuml.cluster import DBSCAN as CuDBSCAN
-    except ImportError as exc:
-        raise RuntimeError(
-            "recluster_impl='cuda' requires RAPIDS cuML/cupy (install cuml and cupy)."
-        ) from exc
-
+def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=12000):
     if not torch.cuda.is_available():
-        raise RuntimeError("recluster_impl='cuda' requested but CUDA is not available.")
+        logger.warning("recluster_impl=cuda requested but CUDA is unavailable; falling back to optimized CPU recluster")
+        return None
 
-    recluster_latent_np = np.asarray(recluster_latent, dtype=np.float32)
-    recluster_latent_gpu = cp.asarray(recluster_latent_np)
+    n_points = recluster_latent.shape[0]
+    if n_points > max_cuda_points:
+        logger.warning(
+            f"recluster_impl=cuda requested but {n_points} points exceed max_cuda_points={max_cuda_points}; falling back to optimized CPU recluster"
+        )
+        return None
 
-    nn = CuNearestNeighbors(n_neighbors=min_k_2, metric='euclidean')
-    nn.fit(recluster_latent_gpu)
-    distances, _ = nn.kneighbors(recluster_latent_gpu)
-    # skip first self-distance column
-    knn_distance_data = cp.asnumpy(distances[:, 1:].reshape(-1))
-
-    threds = _build_recluster_thresholds_from_distances(knn_distance_data, recluster_latent_np.shape[0], min_k_2)
-    if not threds:
-        return []
+    latent_tensor = torch.as_tensor(recluster_latent, dtype=torch.float32, device='cuda')
+    with torch.no_grad():
+        dist = torch.cdist(latent_tensor, latent_tensor, p=2).detach().cpu().numpy()
 
     resultpool = []
-    for thred in threds:
-        dbscan = CuDBSCAN(eps=float(thred), min_samples=5)
-        labels = cp.asnumpy(dbscan.fit_predict(recluster_latent_gpu))
+    for thred in thresholds:
+        if thred < 0.00001:
+            continue
+        adjacency = dist <= thred
+        np.fill_diagonal(adjacency, True)
+        components = _connected_components_from_adjacency(adjacency)
+        for comp in components:
+            if len(comp) > 1:
+                resultpool.append([recluster_index[i] for i in comp])
 
-        res_temp = defaultdict(list)
-        for label, name_index in zip(labels.tolist(), recluster_index):
-            if label != -1:
-                res_temp[label].append(name_index)
-        resultpool.extend(res_temp.values())
-
+    if not resultpool:
+        return []
     unique_resultpool = set(map(tuple, resultpool))
     return list(map(list, unique_resultpool))
 
-
-def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
+def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original"):
     use_optimized = cluster_impl == "optimized"
-    use_recluster_optimized = recluster_impl == "optimized"
-    use_recluster_cuda = recluster_impl == "cuda"
+    use_recluster_optimized = recluster_impl in {"optimized", "cuda"}
 
     result_dict = {}
     # create BIRCH
@@ -410,37 +373,53 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     if min_k_2 < 5:
         return contig_labels,keep_label
 
-    if use_recluster_cuda:
-        if recluster_latent.shape[0] > max_cuda_points:
-            msg = (
-                f"recluster_impl=cuda requested but {recluster_latent.shape[0]} points exceed "
-                f"max_cuda_points={max_cuda_points}"
-            )
-            if cuda_fallback:
-                logger.warning(msg + "; falling back to optimized CPU recluster")
-                use_recluster_cuda = False
-                use_recluster_optimized = True
-            else:
-                raise RuntimeError(msg + "; cuda_fallback is disabled")
-        else:
-            logger.info("recluster mode: cuda")
+    dist_matrix = kneighbors_graph(
+        recluster_latent,
+        n_neighbors=min_k_2,
+        mode='distance',
+        p=2,
+        n_jobs=10)
 
-    if use_recluster_cuda:
-        try:
-            resultpool = _build_recluster_resultpool_cuda(recluster_latent, recluster_index, min_k_2)
-        except Exception as exc:
-            if cuda_fallback:
-                logger.warning(f"cuda recluster failed ({exc}); falling back to optimized CPU recluster")
-                use_recluster_cuda = False
-                use_recluster_optimized = True
-                resultpool = _build_recluster_resultpool_cpu(recluster_latent, recluster_index, min_k_2)
-            else:
-                raise
-    else:
-        resultpool = _build_recluster_resultpool_cpu(recluster_latent, recluster_index, min_k_2)
 
-    if resultpool is None:
-        resultpool = []
+
+    p2_distance = dist_matrix.data
+    eps_p2_2=[]
+
+
+    resultpool = []
+    for k in range(5,min(80,min_k_2),10):
+        eps_value=np.partition(p2_distance,recluster_latent.shape[0]*k-1)[recluster_latent.shape[0]*k-1]
+        eps_p2_2.append(math.floor(0.8*eps_value))
+        eps_p2_2.append(math.floor(eps_value))
+        eps_p2_2.append(math.floor(1.2*eps_value))
+    eps_p2_2 = list(set(eps_p2_2))
+    eps_p2_2.sort()
+
+    if not eps_p2_2:
+        return contig_labels,keep_label
+
+    threds =eps_p2_2 +[0.1*eps_p2_2[0],0.3*eps_p2_2[0],0.5*eps_p2_2[0],10,15,30]
+    threds.sort()
+
+    if recluster_impl == "cuda":
+        resultpool = _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, threds)
+        if resultpool is None:
+            recluster_impl = "optimized"
+    if recluster_impl != "cuda":
+        for thred in threds:
+            if thred<0.00001:
+                continue
+            birch = Birch(threshold=thred, n_clusters=None)
+            labels = birch.fit_predict(recluster_latent)
+
+            res_temp = defaultdict(list)
+            for label, name_index in zip(labels, recluster_index):
+                if label != -1:
+                    res_temp[label].append(name_index)
+            for res in res_temp.values():
+                resultpool.append(res)
+        unique_resultpool = set(map(tuple, resultpool))
+        resultpool = list(map(list, unique_resultpool))
     if not resultpool:
         return contig_labels,keep_label
 
@@ -466,7 +445,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             keep_count = 0
         else:
             keep_count += 1
-        if use_recluster_optimized or use_recluster_cuda:
+        if use_recluster_optimized:
             _prune_resultpool_optimized(resultpool, max_bin.copy())
         else:
             _prune_resultpool_original(resultpool, max_bin.copy())

@@ -101,11 +101,8 @@ If you only want to use LorBin in single mode,
 ```angular2html
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
 
-# experimental GPU mode (requires RAPIDS/cuML + CUDA)
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --max_cuda_points 20000
-
-# strict CUDA-only test (no CPU fallback)
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --disable_cuda_fallback
+# experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
 ```
 To run side-by-side benchmarks with stage-specific switches:
 ```angular2html
@@ -115,11 +112,8 @@ LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl or
 # keep stage-1 default, enable optimized reclustering
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
 
-# experimental GPU mode (requires RAPIDS/cuML + CUDA)
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --max_cuda_points 20000
-
-# strict CUDA-only test (no CPU fallback)
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --disable_cuda_fallback
+# experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
 ```
 ```angular2html
 usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
@@ -144,11 +138,7 @@ options:
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
   --recluster_impl {optimized,original,cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda requires RAPIDS/cuML)
-  --max_cuda_points MAX_CUDA_POINTS
-                        Max points to run stage-2 CUDA recluster on before CPU fallback (default: 12000)
-  --disable_cuda_fallback
-                        Disable CPU fallback when --recluster_impl cuda is requested (fail fast instead)
+                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -216,11 +206,7 @@ options:
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
   --recluster_impl {optimized,original,cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda requires RAPIDS/cuML)
-  --max_cuda_points MAX_CUDA_POINTS
-                        Max points to run stage-2 CUDA recluster on before CPU fallback (default: 12000)
-  --disable_cuda_fallback
-                        Disable CPU fallback when --recluster_impl cuda is requested (fail fast instead)
+                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --num_process NUM_PROCESS
