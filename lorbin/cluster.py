@@ -379,8 +379,8 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         mode='distance',
         p=2,
         n_jobs=10)
-
-
+    if sort_graph_by_row_values is not None:
+        dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
 
     p2_distance = dist_matrix.data
     eps_p2_2=[]
@@ -402,9 +402,11 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     threds.sort()
 
     if recluster_impl == "cuda":
-        resultpool = _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, threds)
-        if resultpool is None:
+        cuda_resultpool = _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, threds)
+        if cuda_resultpool is None:
             recluster_impl = "optimized"
+        else:
+            resultpool = cuda_resultpool
     if recluster_impl != "cuda":
         for thred in threds:
             if thred<0.00001:

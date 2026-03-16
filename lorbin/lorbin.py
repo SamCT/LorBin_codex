@@ -18,6 +18,7 @@ from torch.utils.data.dataset import TensorDataset
 from torch.utils.data import DataLoader
 from .cluster import bin_cluster
 from .check_arg import check_generate_data, check_cluster, check_train
+from . import __version__
 
 
 def concat(outdir, fastas):
@@ -224,12 +225,14 @@ def parser_args():
     train.add_argument('--cuda', help = 'whether use cuda', required=False, action='store_true')
     concat_fasta.add_argument('-fa','--fasta',type=str, nargs='+',help='The path to input FASTA files',required=True)
     concat_fasta.add_argument('-o','--output',help="The path to output FASTA file", required=True)
+    parser.add_argument("--version", action="version", version=f"LorBin {__version__}")
     args = parser.parse_args()
     return args
 
 
 
 def _log_runtime_details(logger, args):
+    logger.info(f"LorBin version: {__version__}")
     logger.info(f"LorBin runtime module: {__file__}")
     logger.info(
         f"runtime args: cluster_impl={getattr(args, 'cluster_impl', None)}, "
