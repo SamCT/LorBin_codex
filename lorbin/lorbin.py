@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+import subprocess
 from Bio import SeqIO
 from .generate_coverage import generate_cov,combine_cov
 from .generate_kmer import generate_kmer_features_from_fasta
@@ -14,6 +15,7 @@ from . import utils as utils
 from .model import vae as vae
 import torch
 import numpy as np
+from importlib import metadata as importlib_metadata
 from torch.utils.data.dataset import TensorDataset
 from torch.utils.data import DataLoader
 from .cluster import bin_cluster
@@ -79,7 +81,7 @@ def train_vae(logger, outdir, batch_size=64, epoch=300, batchsteps=[25],  lrate=
     latent = model.get_latent(testdataloader)
     pd.DataFrame(latent,index=df.index).to_csv(f'{outdir}/embedding.csv')
 
-def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized"):
+def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
     df = pd.read_csv(embeddingdir,index_col=0)
     names = df.index
     contig_all = names
@@ -94,7 +96,7 @@ def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster
     contig_dict = utils.process_fasta(fastadir)
     if bin_length <= 0:
         bin_length = 50  # 直接设置合理默认值
-    labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl)
+    labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
     pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label.csv')
     write_bin(contig_all, labels,contig_dict,f"{outdir}/output_bins",bin_length)
 # 临时定义，避免 NameError
@@ -102,7 +104,7 @@ def generate_cluster(*args, **kwargs):
     # 返回 False 继续程序，返回 True 则会触发 sys.exit()
     return False
 
-def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized"):
+def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
     if generate_cluster(logger, outdir, fastadir, embeddingdir):
         sys.exit()
     df = pd.read_csv(embeddingdir,index_col=0)
@@ -120,7 +122,7 @@ def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, clus
     embedding = df.values
     for i in range(len(nsample)-1):
         latent = embedding[nsample[i]:nsample[i+1]]
-        labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl)
+        labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
         pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label_{samplename[i]}.csv')
         write_bin(contig_all, labels,contig_dict,f"{output}/output_bins_{samplename[i]}",bin_length)
 
@@ -158,11 +160,35 @@ def write_bin(namelist,contig_labels,contig_seqs,output, minfasta):
                 for contig in contigs:
                     ofile.write(f'>{contig}\n{contig_seqs[contig]}\n')
 
+
+
+def _get_cli_version():
+    try:
+        pkg_version = importlib_metadata.version('LorBin')
+    except Exception:
+        pkg_version = 'unknown'
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    git_sha = None
+    try:
+        git_sha = subprocess.check_output(
+            ['git', '-C', repo_root, 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        git_sha = None
+
+    if git_sha:
+        return f'LorBin {pkg_version} (git {git_sha})'
+    return f'LorBin {pkg_version}'
+
 def parser_args():
     parser = argparse.ArgumentParser(
         #description=doc,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         add_help=True,)
+    parser.add_argument('-v', '--version', action='version', version=_get_cli_version())
     subparsers = parser.add_subparsers(title="LorBin subcommands", dest='cmd', metavar='')
     bin_mode = subparsers.add_parser('bin',help="Bin contigs using one command.")
     generate_data = subparsers.add_parser('generate_data', help="Generate sequence features(kmer and abundance) as trainning data.")
@@ -186,7 +212,13 @@ def parser_args():
         p.add_argument('-a','--akeep',default=0.6, help='The cut-off parameters of re-clustering decision model(0~1, default:0.6)')
         p.add_argument('--multi',action='store_true', default=False, help='Cluster uses more samples')
         p.add_argument('--cluster_impl', choices=['optimized', 'original'], default='optimized',
-                      help='Clustering implementation to run (default: optimized)')
+                      help='Stage-1 clustering implementation to run (default: optimized)')
+        p.add_argument('--recluster_impl', choices=['optimized', 'original', 'cuda'], default='original',
+                      help='Stage-2 reclustering implementation to run (default: original; cuda requires RAPIDS/cuML)')
+        p.add_argument('--max_cuda_points', type=int, default=12000,
+                      help='Max points to run stage-2 CUDA recluster on before CPU fallback (default: 12000)')
+        p.add_argument('--disable_cuda_fallback', action='store_true',
+                      help='Disable CPU fallback when --recluster_impl cuda is requested (fail fast instead)')
     # ===== add training args for bin mode =====
     bin_mode.add_argument('--epoch','-n', type=int, default=300,
                         help='training epoch (default: 300)')
@@ -225,6 +257,17 @@ def parser_args():
     args = parser.parse_args()
     return args
 
+
+
+def _log_runtime_details(logger, args):
+    logger.info(f"LorBin runtime module: {__file__}")
+    logger.info(
+        f"runtime args: cluster_impl={getattr(args, 'cluster_impl', None)}, "
+        f"recluster_impl={getattr(args, 'recluster_impl', None)}, "
+        f"max_cuda_points={getattr(args, 'max_cuda_points', None)}, "
+        f"disable_cuda_fallback={getattr(args, 'disable_cuda_fallback', None)}"
+    )
+
 def main():
     args=parser_args()
     logger = logging.getLogger('LorBin')
@@ -235,14 +278,15 @@ def main():
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") # Create a Handler object to control where the log is output
         file_handler.setFormatter(formatter) 
         logger.addHandler(file_handler)
+        _log_runtime_details(logger, args)
         generate_data(logger, args.fasta, args.bam, args.output, args.num_process)
         generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
         train_vae(logger,args.output, epoch=args.epoch)
         embeddingdir = f"{args.output}/embedding.csv"
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, args.max_cuda_points, not args.disable_cuda_fallback)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl, args.recluster_impl, args.max_cuda_points, not args.disable_cuda_fallback)
     elif args.cmd=='generate_data':
         if not check_generate_data(logger, args.fasta, args.bam, args.output):sys.exit()
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
@@ -261,15 +305,16 @@ def main():
         file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
         logger.addHandler(file_handler)
         file_handler.setFormatter(formatter)
+        _log_runtime_details(logger, args)
         generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
         embeddingdir = args.embeddingdir
         if args.embeddingdir==None:
             train_vae(logger, args.output,  args.batch_size, args.epoch, args.batchsteps, args.lrate, args.cuda, args.data)
             embeddingdir = f'{args.output}/embedding.csv'
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, args.max_cuda_points, not args.disable_cuda_fallback)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, args.max_cuda_points, not args.disable_cuda_fallback)
     elif args.cmd=='concat':
         concat(args.output,args.fasta)
     else:

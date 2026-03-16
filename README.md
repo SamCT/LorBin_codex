@@ -64,6 +64,12 @@ conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cpuonly -c 
 
 pip install numpy==1.23.3 scikit-learn=1.1.2 scipy=1.13.1 pandas=2.2.2 joblib=1.4.2
 ```
+### Check installed/runtime version
+Use this to verify the exact runtime version and git SHA (when running from a git checkout):
+```
+LorBin --version
+```
+
 ## <a name="demo"></a>A test dataset to demo LorBin
 We provide a small dataset to demo and test the software. The contigs were assembled by hifiasm.   
 Concatenate the input single FASTA file and create BAM files
@@ -99,11 +105,27 @@ LorBin bin -o outputdir -fa test.fna -b test1.mapped.sorted.bam test2.mapped.sor
 ```
 If you only want to use LorBin in single mode,
 ```angular2html
-LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl optimized
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+
+# experimental GPU mode (requires RAPIDS/cuML + CUDA)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --max_cuda_points 20000
+
+# strict CUDA-only test (no CPU fallback)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --disable_cuda_fallback
 ```
-To run the original clustering implementation for side-by-side benchmarking, use:
+To run side-by-side benchmarks with stage-specific switches:
 ```angular2html
+# keep default recluster (original), tune stage-1 clustering
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl original
+
+# keep stage-1 default, enable optimized reclustering
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+
+# experimental GPU mode (requires RAPIDS/cuML + CUDA)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --max_cuda_points 20000
+
+# strict CUDA-only test (no CPU fallback)
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda --disable_cuda_fallback
 ```
 ```angular2html
 usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
@@ -126,7 +148,13 @@ options:
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
-                        Choose optimized clustering (faster) or original clustering
+                        Stage-1 clustering implementation to run (default: optimized)
+  --recluster_impl {optimized,original,cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda requires RAPIDS/cuML)
+  --max_cuda_points MAX_CUDA_POINTS
+                        Max points to run stage-2 CUDA recluster on before CPU fallback (default: 12000)
+  --disable_cuda_fallback
+                        Disable CPU fallback when --recluster_impl cuda is requested (fail fast instead)
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -192,12 +220,26 @@ options:
                         The cut-off parameters of re-clustering decision model(0~1, default:0.6)
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
-                        Choose optimized clustering (faster) or original clustering
+                        Stage-1 clustering implementation to run (default: optimized)
+  --recluster_impl {optimized,original,cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda requires RAPIDS/cuML)
+  --max_cuda_points MAX_CUDA_POINTS
+                        Max points to run stage-2 CUDA recluster on before CPU fallback (default: 12000)
+  --disable_cuda_fallback
+                        Disable CPU fallback when --recluster_impl cuda is requested (fail fast instead)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --num_process NUM_PROCESS
                         Number of threads used (default: 10)
 ```
+### Troubleshooting CUDA recluster
+If you still see old stack traces (for example errors at `resultpool.append(res)`), you may be running an older installed package instead of this checkout.
+Check `LorBin.log` for the runtime marker lines:
+- `LorBin runtime module: ...`
+- `recluster config: impl=..., max_cuda_points=..., cuda_fallback=...`
+
+If those lines are missing, reinstall from this repo in your environment before re-running.
+
 ## <a name='References'></a>Reference
 [1] Pan, S., Zhao, X.-M. & Coelho, L. P. SemiBin2: self-supervised contrastive learning leads to better MAGs for short- and long-read sequencing. Bioinformatics 39, i21–i29 (2023).   
 [2] Nissen, J. N. et al. Improved metagenome binning and assembly using deep variational autoencoders. Nat Biotechnol 39, 555–560 (2021).
