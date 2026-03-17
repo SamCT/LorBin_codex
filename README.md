@@ -137,7 +137,7 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda}
+  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
                         Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
 ```
 ### Only generate data
@@ -205,7 +205,7 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda}
+  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
                         Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering

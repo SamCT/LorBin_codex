@@ -86,6 +86,49 @@ def test_bin_recluster_impl_cuda(monkeypatch):
     assert args.recluster_impl == "cuda"
 
 
+
+
+def test_bin_recluster_impl_birch_cuda(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--recluster_impl",
+            "birch_cuda",
+        ],
+    )
+    args = parser_args()
+    assert args.recluster_impl == "birch_cuda"
+
+
+def test_bin_recluster_impl_graph_cuda(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--recluster_impl",
+            "graph_cuda",
+        ],
+    )
+    args = parser_args()
+    assert args.recluster_impl == "graph_cuda"
+
 def test_cli_version_flag(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["LorBin", "--version"])
     try:

@@ -188,12 +188,12 @@ def parser_args():
         p.add_argument('--multi',action='store_true', default=False, help='Cluster uses more samples')
         p.add_argument('--cluster_impl', choices=['optimized', 'original'], default='optimized',
                       help='Stage-1 clustering implementation to run (default: optimized)')
-        p.add_argument('--recluster_impl', choices=['optimized', 'original', 'cuda'], default='original',
-                      help='Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)')
+        p.add_argument('--recluster_impl', choices=['optimized', 'original', 'cuda', 'graph_cuda', 'birch_cuda'], default='original',
+                      help='Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)')
         p.add_argument('--max_cuda_points', type=int, default=12000,
                       help='Max contigs for CUDA recluster distance matrix (default: 12000)')
         p.add_argument('--disable_cuda_fallback', action='store_true', default=False,
-                      help='If set with --recluster_impl cuda, fail instead of falling back to CPU recluster')
+                      help='If set with CUDA recluster impls, fail instead of falling back to CPU recluster')
     # ===== add training args for bin mode =====
     bin_mode.add_argument('--epoch','-n', type=int, default=300,
                         help='training epoch (default: 300)')
