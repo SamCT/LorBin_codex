@@ -137,8 +137,8 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
+  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -205,8 +205,8 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda requires CUDA-capable PyTorch)
+  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
+                        Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --num_process NUM_PROCESS
@@ -219,6 +219,44 @@ Check `LorBin.log` for the runtime marker lines:
 - `recluster config: impl=..., max_cuda_points=..., cuda_fallback=...`
 
 If those lines are missing, reinstall from this repo in your environment before re-running.
+
+
+### CUDA dependencies for `birch_cuda` in pixi
+`birch_cuda` does **not** introduce a new dependency beyond the existing CUDA-enabled PyTorch stack.
+It uses basic tensor distance/math ops (`torch.cdist`, reductions), not cuDNN-specific NN layers.
+
+If your runtime complains about `libcudnn.so.9`, that usually means a CUDA 12 / newer PyTorch build was installed somewhere in the environment.
+With your pinned stack (`torch==1.11.0+cu113`), you should target CUDA 11.3 compatible runtime libraries (cuDNN 8.x), not cuDNN 9.
+
+Example pixi-style configuration (same style you already use):
+
+```toml
+[system-requirements]
+cuda = "11.3"
+
+[dependencies]
+python = "3.10.*"
+biopython = ">=1.86,<2"
+hmmer = ">=3.4,<4"
+prodigal = ">=2.6.3,<3"
+samtools = ">=1.23,<2"
+bedtools = ">=2.31.1,<3"
+pandas = ">=2.3.3,<3"
+scikit-learn = ">=1.7.2,<2"
+numpy = "1.23.3.*"
+
+[pypi-dependencies]
+torch = { version = "==1.11.0+cu113", index = "https://download.pytorch.org/whl/cu113" }
+torchvision = { version = "==0.12.0+cu113", index = "https://download.pytorch.org/whl/cu113" }
+torchaudio = { version = "==0.11.0", index = "https://download.pytorch.org/whl/cu113" }
+```
+
+If you intentionally move to a newer CUDA/PyTorch family, update all `torch*` packages together and align system CUDA/cuDNN accordingly.
+
+`--max_cuda_points` now supports automatic sizing: `0` means auto-derive a safe limit from GPU VRAM (recommended on cards like L40S).
+Use a positive value only when you want to force a stricter cap.
+
+For correctness parity, `birch_cuda` currently uses the same sklearn BIRCH candidate-generation logic as the original stage-2 path after CUDA availability/size gating.
 
 ## <a name='References'></a>Reference
 [1] Pan, S., Zhao, X.-M. & Coelho, L. P. SemiBin2: self-supervised contrastive learning leads to better MAGs for short- and long-read sequencing. Bioinformatics 39, i21–i29 (2023).   

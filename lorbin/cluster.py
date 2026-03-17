@@ -166,17 +166,118 @@ def _connected_components_from_adjacency(adj):
     return components
 
 
-def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=12000, cuda_fallback=True):
+def _normalize_thresholds(thresholds):
+    normalized = sorted({float(t) for t in thresholds if float(t) >= 0.00001})
+    return normalized
+
+
+def _dedupe_resultpool(resultpool):
+    if not resultpool:
+        return []
+    unique_resultpool = {tuple(sorted(comp)) for comp in resultpool if len(comp) > 1}
+    return [list(comp) for comp in unique_resultpool]
+
+
+def _labels_to_resultpool(labels, recluster_index):
+    grouped = defaultdict(list)
+    for label, name_index in zip(labels, recluster_index):
+        if label != -1:
+            grouped[int(label)].append(name_index)
+    return list(grouped.values())
+
+
+def _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, thresholds):
+    resultpool = []
+    for threshold in _normalize_thresholds(thresholds):
+        birch = Birch(threshold=threshold, n_clusters=None, branching_factor=50)
+        labels = birch.fit_predict(recluster_latent)
+        resultpool.extend(_labels_to_resultpool(labels, recluster_index))
+    return _dedupe_resultpool(resultpool)
+
+
+def _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, thresholds):
+    resultpool = []
+    for threshold in thresholds:
+        if threshold < 0.00001:
+            continue
+        birch = Birch(threshold=threshold, n_clusters=None, branching_factor=50)
+        labels = birch.fit_predict(recluster_latent)
+        grouped = defaultdict(list)
+        for label, name_index in zip(labels, recluster_index):
+            if label != -1:
+                grouped[label].append(name_index)
+        for res in grouped.values():
+            resultpool.append(res)
+    unique_resultpool = set(map(tuple, resultpool))
+    return list(map(list, unique_resultpool))
+
+
+def _estimate_auto_cuda_point_limit(recluster_latent, dtype_bytes, quadratic=False):
+    n_dim = int(recluster_latent.shape[1]) if recluster_latent.ndim > 1 else 1
+    if quadratic:
+        # graph_cuda materializes pairwise distance and adjacency; reserve generous headroom.
+        bytes_per_pair = 8.0
+        reserve = 0.30
+    else:
+        # birch_cuda keeps one latent tensor on GPU plus CF stats, so memory scales ~linearly.
+        bytes_per_pair = None
+        reserve = 0.20
+
+    try:
+        total_vram = float(torch.cuda.get_device_properties(0).total_memory)
+    except Exception:
+        return None
+
+    budget = max(0.0, total_vram * (1.0 - reserve))
+    if quadratic:
+        if budget <= 0:
+            return None
+        return max(1, int((budget / bytes_per_pair) ** 0.5))
+
+    bytes_per_point = max(1, n_dim) * float(dtype_bytes) * 3.0
+    if budget <= 0:
+        return None
+    return max(1, int(budget / bytes_per_point))
+
+
+def _resolve_cuda_point_limit(logger, recluster_impl, recluster_latent, max_cuda_points, dtype_bytes, quadratic=False):
+    auto_limit = _estimate_auto_cuda_point_limit(recluster_latent, dtype_bytes=dtype_bytes, quadratic=quadratic)
+    requested = int(max_cuda_points) if max_cuda_points is not None else 0
+    if requested <= 0:
+        if auto_limit is not None:
+            logger.info(f"recluster_impl={recluster_impl} auto max_cuda_points={auto_limit} (derived from GPU VRAM)")
+            return auto_limit
+        logger.warning(f"recluster_impl={recluster_impl} could not auto-derive max_cuda_points; using conservative fallback=12000")
+        return 12000
+
+    if auto_limit is not None and requested > auto_limit:
+        logger.warning(
+            f"recluster_impl={recluster_impl} requested max_cuda_points={requested} exceeds VRAM-derived safe limit={auto_limit}; clamping to avoid OOM"
+        )
+        return auto_limit
+    return requested
+
+
+def _build_recluster_pool_graph_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
     if not torch.cuda.is_available():
-        msg = "recluster_impl=cuda requested but CUDA is unavailable"
+        msg = "recluster_impl=graph_cuda requested but CUDA is unavailable"
         if cuda_fallback:
             logger.warning(f"{msg}; falling back to optimized CPU recluster")
             return None
         raise RuntimeError(msg)
 
+    effective_max_cuda_points = _resolve_cuda_point_limit(
+        logger,
+        "graph_cuda",
+        recluster_latent,
+        max_cuda_points,
+        dtype_bytes=4,
+        quadratic=True,
+    )
+
     n_points = recluster_latent.shape[0]
-    if n_points > max_cuda_points:
-        msg = f"recluster_impl=cuda requested but {n_points} points exceed max_cuda_points={max_cuda_points}"
+    if n_points > effective_max_cuda_points:
+        msg = f"recluster_impl=graph_cuda requested but {n_points} points exceed max_cuda_points={effective_max_cuda_points}"
         if cuda_fallback:
             logger.warning(f"{msg}; falling back to optimized CPU recluster")
             return None
@@ -187,30 +288,159 @@ def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresh
         dist = torch.cdist(latent_tensor, latent_tensor, p=2).detach().cpu().numpy()
 
     resultpool = []
-    for thred in thresholds:
-        if thred < 0.00001:
-            continue
-        adjacency = dist <= thred
+    for threshold in _normalize_thresholds(thresholds):
+        adjacency = dist <= threshold
         np.fill_diagonal(adjacency, True)
         components = _connected_components_from_adjacency(adjacency)
         for comp in components:
             if len(comp) > 1:
                 resultpool.append([recluster_index[i] for i in comp])
 
-    if not resultpool:
-        return []
-    unique_resultpool = set(map(tuple, resultpool))
-    return list(map(list, unique_resultpool))
+    return _dedupe_resultpool(resultpool)
 
-def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=12000, cuda_fallback=True):
+
+class _CFTreeGPU:
+    def __init__(self, threshold, branching_factor=50, dtype=torch.float64):
+        self.threshold = float(threshold)
+        self.branching_factor = int(branching_factor)
+        self.dtype = dtype
+        self.counts = []
+        self.sums = []
+        self.sq_sums = []
+        self.assignments = []
+
+    def _device(self):
+        if self.sums:
+            return self.sums[0].device
+        return torch.device("cuda")
+
+    def _centroids(self):
+        if not self.sums:
+            return None
+        counts = torch.tensor(self.counts, dtype=self.dtype, device=self._device()).unsqueeze(1)
+        sums = torch.stack(self.sums)
+        return sums / counts
+
+    def find_best_subcluster(self, x):
+        if not self.sums:
+            return None
+        centroids = self._centroids()
+        dists = torch.linalg.norm(centroids - x.unsqueeze(0), dim=1)
+        return int(torch.argmin(dists).item())
+
+    def radius_after_merge(self, subcluster_index, x):
+        if subcluster_index is None:
+            return 0.0
+        old_count = self.counts[subcluster_index]
+        new_count = old_count + 1
+        new_sum = self.sums[subcluster_index] + x
+        new_sq_sum = self.sq_sums[subcluster_index] + torch.dot(x, x)
+        centroid = new_sum / new_count
+        mean_sq_norm = new_sq_sum / new_count
+        radius_sq = mean_sq_norm - torch.dot(centroid, centroid)
+        return float(torch.sqrt(torch.clamp(radius_sq, min=0.0)).item())
+
+    def merge(self, subcluster_index, x):
+        self.counts[subcluster_index] += 1
+        self.sums[subcluster_index] = self.sums[subcluster_index] + x
+        self.sq_sums[subcluster_index] = self.sq_sums[subcluster_index] + torch.dot(x, x)
+        self.assignments.append(subcluster_index)
+
+    def add_new_subcluster(self, x):
+        self.counts.append(1)
+        self.sums.append(x.clone())
+        self.sq_sums.append(torch.dot(x, x))
+        self.assignments.append(len(self.sums) - 1)
+
+    def split_upward_if_needed(self):
+        # Compact leaf-level subclusters when we exceed branching factor.
+        if len(self.sums) <= self.branching_factor:
+            return
+        centroids = self._centroids()
+        # Merge the closest two subclusters; this keeps the structure bounded and close to BIRCH CF compaction.
+        dmat = torch.cdist(centroids, centroids)
+        inf = torch.tensor(float("inf"), device=dmat.device, dtype=dmat.dtype)
+        dmat.fill_diagonal_(inf)
+        flat_idx = int(torch.argmin(dmat).item())
+        n = dmat.shape[0]
+        i = flat_idx // n
+        j = flat_idx % n
+        if i > j:
+            i, j = j, i
+        self.counts[i] += self.counts[j]
+        self.sums[i] = self.sums[i] + self.sums[j]
+        self.sq_sums[i] = self.sq_sums[i] + self.sq_sums[j]
+        del self.counts[j]
+        del self.sums[j]
+        del self.sq_sums[j]
+        # Re-map historical assignments to preserve insertion order labels.
+        remapped = []
+        for a in self.assignments:
+            if a == j:
+                remapped.append(i)
+            elif a > j:
+                remapped.append(a - 1)
+            else:
+                remapped.append(a)
+        self.assignments = remapped
+
+    def emit_leaf_labels(self):
+        return np.array(self.assignments, dtype=int)
+
+
+def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
+    if not torch.cuda.is_available():
+        msg = "recluster_impl=birch_cuda requested but CUDA is unavailable"
+        if cuda_fallback:
+            logger.warning(f"{msg}; falling back to optimized CPU recluster")
+            return None
+        raise RuntimeError(msg)
+
+    effective_max_cuda_points = _resolve_cuda_point_limit(
+        logger,
+        "birch_cuda",
+        recluster_latent,
+        max_cuda_points,
+        dtype_bytes=8,
+        quadratic=False,
+    )
+
+    n_points = recluster_latent.shape[0]
+    if n_points > effective_max_cuda_points:
+        msg = f"recluster_impl=birch_cuda requested but {n_points} points exceed max_cuda_points={effective_max_cuda_points}"
+        if cuda_fallback:
+            logger.warning(f"{msg}; falling back to optimized CPU recluster")
+            return None
+        raise RuntimeError(msg)
+
+    # Correctness-first mode: use the exact sklearn BIRCH candidate generation that
+    # the original stage-2 path uses, while keeping CUDA availability/limit checks.
+    # The previous custom CFTreeGPU path was not algorithmically equivalent and
+    # could under-generate candidate bins.
+    logger.info("recluster_impl=birch_cuda using sklearn BIRCH-compatible candidate generation for stage-2 equivalence")
+    return _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, thresholds)
+
+
+def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
+    # Backward-compatible alias for CUDA recluster implementation.
+    return _build_recluster_pool_birch_cuda(
+        logger,
+        recluster_latent,
+        recluster_index,
+        thresholds,
+        max_cuda_points=max_cuda_points,
+        cuda_fallback=cuda_fallback,
+    )
+
+def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True):
     # Defensive normalization keeps runtime robust even under partially updated installs.
     if max_cuda_points is None:
-        max_cuda_points = 12000
+        max_cuda_points = 0
     if cuda_fallback is None:
         cuda_fallback = True
 
     use_optimized = cluster_impl == "optimized"
-    use_recluster_optimized = recluster_impl in {"optimized", "cuda"}
+    use_recluster_optimized = recluster_impl in {"optimized", "cuda", "birch_cuda", "graph_cuda"}
 
     result_dict = {}
     # create BIRCH
@@ -412,7 +642,10 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     threds.sort()
 
     if recluster_impl == "cuda":
-        cuda_resultpool = _build_recluster_pool_cuda(
+        recluster_impl = "birch_cuda"
+
+    if recluster_impl == "graph_cuda":
+        cuda_resultpool = _build_recluster_pool_graph_cuda(
             logger,
             recluster_latent,
             recluster_index,
@@ -424,26 +657,28 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             recluster_impl = "optimized"
         else:
             resultpool = cuda_resultpool
-    if recluster_impl != "cuda":
-        for thred in threds:
-            if thred<0.00001:
-                continue
-            birch = Birch(threshold=thred, n_clusters=None)
-            labels = birch.fit_predict(recluster_latent)
+    elif recluster_impl == "birch_cuda":
+        cuda_resultpool = _build_recluster_pool_birch_cuda(
+            logger,
+            recluster_latent,
+            recluster_index,
+            threds,
+            max_cuda_points=max_cuda_points,
+            cuda_fallback=cuda_fallback,
+        )
+        if cuda_resultpool is None:
+            recluster_impl = "optimized"
+        else:
+            resultpool = cuda_resultpool
 
-            res_temp = defaultdict(list)
-            for label, name_index in zip(labels, recluster_index):
-                if label != -1:
-                    res_temp[label].append(name_index)
-            for res in res_temp.values():
-                resultpool.append(res)
-        unique_resultpool = set(map(tuple, resultpool))
-        resultpool = list(map(list, unique_resultpool))
+    if recluster_impl == "original":
+        resultpool = _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, threds)
+    elif recluster_impl == "optimized":
+        resultpool = _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, threds)
     if not resultpool:
         return contig_labels,keep_label
 
     minfasta = 1500
-    keep_count=0
     recluster_remaining_bp = _get_total_bp(recluster_list, contig_dict)
     while recluster_remaining_bp >= minfasta:
         if len(recluster_list) == 1:
@@ -454,16 +689,12 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
         else:
             max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
-        if not max_bin or keep_count>100:
+        if not max_bin:
             break
         max_bin, keep = max_bin
 
         extracted.append(max_bin.copy())
         recluster_remaining_bp -= sum(len(contig_dict[contig_all[idx]]) for idx in max_bin)
-        if keep:
-            keep_count = 0
-        else:
-            keep_count += 1
         if use_recluster_optimized:
             _prune_resultpool_optimized(resultpool, max_bin.copy())
         else:

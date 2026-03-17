@@ -22,7 +22,7 @@ def test_cuda_fallback_populates_resultpool(monkeypatch):
     monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
 
     class DummyBirch:
-        def __init__(self, threshold, n_clusters=None):
+        def __init__(self, threshold, n_clusters=None, branching_factor=50, **_kwargs):
             self.threshold = threshold
 
         def fit_predict(self, X):
@@ -44,7 +44,7 @@ def test_cuda_fallback_populates_resultpool(monkeypatch):
     monkeypatch.setattr(cluster_mod, "get_bin_best", fake_get_bin_best)
 
     # Simulate CUDA path returning None to force optimized fallback.
-    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_cuda", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cuda", lambda *_args, **_kwargs: None)
 
     class DummyLogger:
         def info(self, *_args, **_kwargs):
@@ -92,7 +92,7 @@ def test_cuda_no_fallback_raises(monkeypatch):
 
     monkeypatch.setattr(cluster_mod, "DBSCAN", lambda *a, **k: type("D", (), {"fit": lambda self, *_a, **_k: self, "labels_": np.full(len(latent), -1, dtype=int)})())
     monkeypatch.setattr(cluster_mod, "get_bin_best", lambda *_a, **_k: None)
-    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_cuda", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cuda unavailable")))
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cuda", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cuda unavailable")))
 
     class DummyLogger:
         def info(self, *_args, **_kwargs):
@@ -141,7 +141,7 @@ def test_recluster_none_config_values_are_normalized(monkeypatch):
     monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
 
     class DummyBirch:
-        def __init__(self, threshold, n_clusters=None):
+        def __init__(self, threshold, n_clusters=None, branching_factor=50, **_kwargs):
             self.threshold = threshold
 
         def fit_predict(self, X):
@@ -185,3 +185,105 @@ def test_recluster_none_config_values_are_normalized(monkeypatch):
 
     assert len(labels) == len(contig_all)
     assert isinstance(keep, list)
+
+
+def test_recluster_not_limited_to_100_bins(monkeypatch):
+    n = 150
+    latent = np.array([[float(i), 0.0] for i in range(n)], dtype=np.float32)
+    contig_all = np.array([f"c{i}" for i in range(n)])
+    contig_list = contig_all.tolist()
+    contig_dict = {name: "A" * 2000 for name in contig_list}
+    contig2marker = {name: ["m1"] for name in contig_list}
+
+    class DummyModel:
+        def load_state_dict(self, _):
+            return None
+
+        def __call__(self, _):
+            return 1.0
+
+    monkeypatch.setattr(cluster_mod, "EvaluationModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod, "KeepModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
+
+    class DummyBirch:
+        def __init__(self, threshold, n_clusters=None, branching_factor=50, **_kwargs):
+            self.threshold = threshold
+
+        def fit_predict(self, X):
+            # one singleton cluster per point, creates >100 stage-2 candidates
+            return np.arange(len(X), dtype=int)
+
+    monkeypatch.setattr(cluster_mod, "Birch", DummyBirch)
+    monkeypatch.setattr(cluster_mod, "DBSCAN", lambda *a, **k: type("D", (), {"fit": lambda self, *_a, **_k: self, "labels_": np.full(len(latent), -1, dtype=int)})())
+
+    def fake_get_bin_best(_keepmodel, _evaluationmodel, resultpool, *_args, **_kwargs):
+        if not resultpool:
+            return None
+        return resultpool[0], True
+
+    monkeypatch.setattr(cluster_mod, "get_bin_best", fake_get_bin_best)
+
+    class DummyLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    labels, _keep = cluster_mod.bin_cluster(
+        DummyLogger(),
+        latent,
+        contig2marker,
+        contig_dict,
+        contig_list,
+        contig_all,
+        minfasta=10_000_000,
+        feature="no_markers",
+        a=0.6,
+        cluster_impl="optimized",
+        recluster_impl="original",
+    )
+
+    # Regression: stage-2 should not stop at 100 iterations.
+    assert len(set(labels)) > 100
+
+
+def test_birch_cuda_uses_cpu_original_candidate_builder(monkeypatch):
+    latent = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    recluster_index = [3, 7]
+    thresholds = [0.5, 1.0]
+
+    monkeypatch.setattr(cluster_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cluster_mod, "_resolve_cuda_point_limit", lambda *a, **k: 1000)
+
+    captured = {}
+
+    def fake_cpu_original(latent_in, idx_in, threds_in):
+        captured["latent_shape"] = latent_in.shape
+        captured["idx"] = idx_in
+        captured["threds"] = threds_in
+        return [[idx_in[0]], [idx_in[1]]]
+
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cpu_original", fake_cpu_original)
+
+    class DummyLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    out = cluster_mod._build_recluster_pool_birch_cuda(
+        DummyLogger(),
+        latent,
+        recluster_index,
+        thresholds,
+        max_cuda_points=0,
+        cuda_fallback=True,
+    )
+
+    assert out == [[3], [7]]
+    assert captured["latent_shape"] == latent.shape
+    assert captured["idx"] == recluster_index
+    assert captured["threds"] == thresholds
