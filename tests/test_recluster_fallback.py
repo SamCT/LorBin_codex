@@ -22,7 +22,7 @@ def test_cuda_fallback_populates_resultpool(monkeypatch):
     monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
 
     class DummyBirch:
-        def __init__(self, threshold, n_clusters=None):
+        def __init__(self, threshold, n_clusters=None, branching_factor=50, **_kwargs):
             self.threshold = threshold
 
         def fit_predict(self, X):
@@ -44,7 +44,7 @@ def test_cuda_fallback_populates_resultpool(monkeypatch):
     monkeypatch.setattr(cluster_mod, "get_bin_best", fake_get_bin_best)
 
     # Simulate CUDA path returning None to force optimized fallback.
-    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_cuda", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cuda", lambda *_args, **_kwargs: None)
 
     class DummyLogger:
         def info(self, *_args, **_kwargs):
@@ -92,7 +92,7 @@ def test_cuda_no_fallback_raises(monkeypatch):
 
     monkeypatch.setattr(cluster_mod, "DBSCAN", lambda *a, **k: type("D", (), {"fit": lambda self, *_a, **_k: self, "labels_": np.full(len(latent), -1, dtype=int)})())
     monkeypatch.setattr(cluster_mod, "get_bin_best", lambda *_a, **_k: None)
-    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_cuda", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cuda unavailable")))
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cuda", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cuda unavailable")))
 
     class DummyLogger:
         def info(self, *_args, **_kwargs):
@@ -141,7 +141,7 @@ def test_recluster_none_config_values_are_normalized(monkeypatch):
     monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
 
     class DummyBirch:
-        def __init__(self, threshold, n_clusters=None):
+        def __init__(self, threshold, n_clusters=None, branching_factor=50, **_kwargs):
             self.threshold = threshold
 
         def fit_predict(self, X):
