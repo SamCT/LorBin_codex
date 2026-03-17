@@ -353,18 +353,36 @@ class _CFTreeGPU:
         self.assignments.append(len(self.sums) - 1)
 
     def split_upward_if_needed(self):
-        # NOTE: do not merge existing subclusters here.
-        #
-        # A previous approximation merged the closest pair whenever we exceeded
-        # branching_factor. That is *not* how BIRCH split propagation works and
-        # it aggressively collapses clusters, which can massively reduce final
-        # bin counts in stage-2.
-        #
-        # For now we keep leaf subclusters intact (no destructive compaction)
-        # so label assignment remains faithful to threshold-based insertion.
-        # This avoids the pathological over-merging behavior observed in
-        # birch_cuda compared to CPU BIRCH.
-        return
+        # Compact leaf-level subclusters when we exceed branching factor.
+        if len(self.sums) <= self.branching_factor:
+            return
+        centroids = self._centroids()
+        # Merge the closest two subclusters; this keeps the structure bounded and close to BIRCH CF compaction.
+        dmat = torch.cdist(centroids, centroids)
+        inf = torch.tensor(float("inf"), device=dmat.device, dtype=dmat.dtype)
+        dmat.fill_diagonal_(inf)
+        flat_idx = int(torch.argmin(dmat).item())
+        n = dmat.shape[0]
+        i = flat_idx // n
+        j = flat_idx % n
+        if i > j:
+            i, j = j, i
+        self.counts[i] += self.counts[j]
+        self.sums[i] = self.sums[i] + self.sums[j]
+        self.sq_sums[i] = self.sq_sums[i] + self.sq_sums[j]
+        del self.counts[j]
+        del self.sums[j]
+        del self.sq_sums[j]
+        # Re-map historical assignments to preserve insertion order labels.
+        remapped = []
+        for a in self.assignments:
+            if a == j:
+                remapped.append(i)
+            elif a > j:
+                remapped.append(a - 1)
+            else:
+                remapped.append(a)
+        self.assignments = remapped
 
     def emit_leaf_labels(self):
         return np.array(self.assignments, dtype=int)
@@ -395,20 +413,12 @@ def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, 
             return None
         raise RuntimeError(msg)
 
-    latent_tensor = torch.as_tensor(recluster_latent, dtype=torch.float64, device='cuda')
-    resultpool = []
-    for threshold in _normalize_thresholds(thresholds):
-        tree = _CFTreeGPU(branching_factor=50, threshold=threshold, dtype=torch.float64)
-        for x in latent_tensor:
-            subcluster = tree.find_best_subcluster(x)
-            if subcluster is not None and tree.radius_after_merge(subcluster, x) <= threshold:
-                tree.merge(subcluster, x)
-            else:
-                tree.add_new_subcluster(x)
-                tree.split_upward_if_needed()
-        labels = tree.emit_leaf_labels()
-        resultpool.extend(_labels_to_resultpool(labels, recluster_index))
-    return _dedupe_resultpool(resultpool)
+    # Correctness-first mode: use the exact sklearn BIRCH candidate generation that
+    # the original stage-2 path uses, while keeping CUDA availability/limit checks.
+    # The previous custom CFTreeGPU path was not algorithmically equivalent and
+    # could under-generate candidate bins.
+    logger.info("recluster_impl=birch_cuda using sklearn BIRCH-compatible candidate generation for stage-2 equivalence")
+    return _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, thresholds)
 
 
 def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
@@ -669,7 +679,6 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         return contig_labels,keep_label
 
     minfasta = 1500
-    keep_count=0
     recluster_remaining_bp = _get_total_bp(recluster_list, contig_dict)
     while recluster_remaining_bp >= minfasta:
         if len(recluster_list) == 1:
@@ -680,16 +689,12 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
         else:
             max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
-        if not max_bin or keep_count>100:
+        if not max_bin:
             break
         max_bin, keep = max_bin
 
         extracted.append(max_bin.copy())
         recluster_remaining_bp -= sum(len(contig_dict[contig_all[idx]]) for idx in max_bin)
-        if keep:
-            keep_count = 0
-        else:
-            keep_count += 1
         if use_recluster_optimized:
             _prune_resultpool_optimized(resultpool, max_bin.copy())
         else:
