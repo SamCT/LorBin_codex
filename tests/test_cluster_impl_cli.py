@@ -146,7 +146,7 @@ def test_bin_max_cuda_points_default(monkeypatch):
         ["LorBin", "bin", "-o", "out", "-fa", "input.fa", "-b", "input.bam"],
     )
     args = parser_args()
-    assert args.max_cuda_points == 12000
+    assert args.max_cuda_points == 0
 
 
 def test_bin_disable_cuda_fallback_flag(monkeypatch):

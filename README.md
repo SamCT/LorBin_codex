@@ -253,6 +253,9 @@ torchaudio = { version = "==0.11.0", index = "https://download.pytorch.org/whl/c
 
 If you intentionally move to a newer CUDA/PyTorch family, update all `torch*` packages together and align system CUDA/cuDNN accordingly.
 
+`--max_cuda_points` now supports automatic sizing: `0` means auto-derive a safe limit from GPU VRAM (recommended on cards like L40S).
+Use a positive value only when you want to force a stricter cap.
+
 ## <a name='References'></a>Reference
 [1] Pan, S., Zhao, X.-M. & Coelho, L. P. SemiBin2: self-supervised contrastive learning leads to better MAGs for short- and long-read sequencing. Bioinformatics 39, i21–i29 (2023).   
 [2] Nissen, J. N. et al. Improved metagenome binning and assembly using deep variational autoencoders. Nat Biotechnol 39, 555–560 (2021).
