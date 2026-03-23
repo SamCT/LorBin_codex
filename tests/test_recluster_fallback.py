@@ -64,7 +64,7 @@ def test_cuda_fallback_populates_resultpool(monkeypatch):
         feature="no_markers",
         a=0.6,
         cluster_impl="optimized",
-        recluster_impl="cuda",
+        recluster_impl="birch_cuda",
     )
 
     # Regression: should not crash and should produce labels via CPU fallback path.
@@ -113,7 +113,7 @@ def test_cuda_no_fallback_raises(monkeypatch):
             feature="no_markers",
             a=0.6,
             cluster_impl="optimized",
-            recluster_impl="cuda",
+            recluster_impl="birch_cuda",
             cuda_fallback=False,
         )
     except RuntimeError as exc:
@@ -178,11 +178,76 @@ def test_recluster_none_config_values_are_normalized(monkeypatch):
         feature="no_markers",
         a=0.6,
         cluster_impl="optimized",
-        recluster_impl="cuda",
+        recluster_impl="birch_cuda",
         max_cuda_points=None,
         cuda_fallback=None,
     )
 
+    assert len(labels) == len(contig_all)
+    assert isinstance(keep, list)
+
+
+def test_cuda_alias_routes_to_optimized(monkeypatch):
+    latent = np.array([[float(i), 0.0] for i in range(12)], dtype=np.float32)
+    contig_all = np.array([f"c{i}" for i in range(12)])
+    contig_list = contig_all.tolist()
+    contig_dict = {name: "A" * 2000 for name in contig_list}
+    contig2marker = {name: ["m1"] for name in contig_list}
+
+    class DummyModel:
+        def load_state_dict(self, _):
+            return None
+
+        def __call__(self, _):
+            return 1.0
+
+    monkeypatch.setattr(cluster_mod, "EvaluationModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod, "KeepModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cluster_mod, "DBSCAN", lambda *a, **k: type("D", (), {"fit": lambda self, *_a, **_k: self, "labels_": np.full(len(latent), -1, dtype=int)})())
+
+    def fake_get_bin_best(_keepmodel, _evaluationmodel, resultpool, *_args, **_kwargs):
+        if not resultpool:
+            return None
+        return resultpool[0], True
+
+    monkeypatch.setattr(cluster_mod, "get_bin_best", fake_get_bin_best)
+
+    calls = {"optimized": 0}
+
+    def fake_optimized(_latent, _idx, _thresholds, **_kwargs):
+        calls["optimized"] += 1
+        return [[0, 1]]
+
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cpu", fake_optimized)
+
+    class DummyLogger:
+        def __init__(self):
+            self.warnings = []
+
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, message, *_args, **_kwargs):
+            self.warnings.append(message)
+
+    logger = DummyLogger()
+    labels, keep = cluster_mod.bin_cluster(
+        logger,
+        latent,
+        contig2marker,
+        contig_dict,
+        contig_list,
+        contig_all,
+        minfasta=10_000_000,
+        feature="no_markers",
+        a=0.6,
+        cluster_impl="optimized",
+        recluster_impl="cuda",
+    )
+
+    assert calls["optimized"] == 1
+    assert any("legacy alias" in warning for warning in logger.warnings)
     assert len(labels) == len(contig_all)
     assert isinstance(keep, list)
 

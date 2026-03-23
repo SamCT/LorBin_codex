@@ -80,7 +80,7 @@ def train_vae(logger, outdir, batch_size=64, epoch=300, batchsteps=[25],  lrate=
     latent = model.get_latent(testdataloader)
     pd.DataFrame(latent,index=df.index).to_csv(f'{outdir}/embedding.csv')
 
-def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True):
+def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True, cluster_n_jobs=None, approximate_threshold_pruning=False):
     df = pd.read_csv(embeddingdir,index_col=0)
     names = df.index
     contig_all = names
@@ -95,7 +95,23 @@ def cluster(logger, outdir,fastadir,embeddingdir, bin_length, feature,a, cluster
     contig_dict = utils.process_fasta(fastadir)
     if bin_length <= 0:
         bin_length = 50  # 直接设置合理默认值
-    labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
+    labels, keep = bin_cluster(
+        logger,
+        latent,
+        contig2marker,
+        contig_dict,
+        contig_list,
+        contig_all,
+        bin_length,
+        feature,
+        a,
+        cluster_impl=cluster_impl,
+        recluster_impl=recluster_impl,
+        max_cuda_points=max_cuda_points,
+        cuda_fallback=cuda_fallback,
+        cluster_n_jobs=cluster_n_jobs,
+        approximate_threshold_pruning=approximate_threshold_pruning,
+    )
     pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label.csv')
     write_bin(contig_all, labels,contig_dict,f"{outdir}/output_bins",bin_length)
 # 临时定义，避免 NameError
@@ -103,7 +119,7 @@ def generate_cluster(*args, **kwargs):
     # 返回 False 继续程序，返回 True 则会触发 sys.exit()
     return False
 
-def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True):
+def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True, cluster_n_jobs=None, approximate_threshold_pruning=False):
     if generate_cluster(logger, outdir, fastadir, embeddingdir):
         sys.exit()
     df = pd.read_csv(embeddingdir,index_col=0)
@@ -121,7 +137,23 @@ def mcluster(logger, outdir, fastadir, embeddingdir, bin_length, feature,a, clus
     embedding = df.values
     for i in range(len(nsample)-1):
         latent = embedding[nsample[i]:nsample[i+1]]
-        labels, keep = bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, bin_length, feature, a, cluster_impl=cluster_impl, recluster_impl=recluster_impl, max_cuda_points=max_cuda_points, cuda_fallback=cuda_fallback)
+        labels, keep = bin_cluster(
+            logger,
+            latent,
+            contig2marker,
+            contig_dict,
+            contig_list,
+            contig_all,
+            bin_length,
+            feature,
+            a,
+            cluster_impl=cluster_impl,
+            recluster_impl=recluster_impl,
+            max_cuda_points=max_cuda_points,
+            cuda_fallback=cuda_fallback,
+            cluster_n_jobs=cluster_n_jobs,
+            approximate_threshold_pruning=approximate_threshold_pruning,
+        )
         pd.DataFrame({'label':labels},index=contig_all).to_csv(f'{outdir}/label_{samplename[i]}.csv')
         write_bin(contig_all, labels,contig_dict,f"{output}/output_bins_{samplename[i]}",bin_length)
 
@@ -177,10 +209,12 @@ def parser_args():
     for p in [ bin_mode, generate_data]:
         p.add_argument('-b','--bam',type=str, nargs='+',help='Path to the input BAM(.bam) file. ',required=True,default=None)
         p.add_argument(
+            '--threads',
             '--num_process',
+            dest='threads',
             type=int,
-            default=10,
-            help='Number of threads used (default: 10)'
+            default=0,
+            help='Number of threads used (0=auto/all available cores)'
         )
     for p in [bin_mode, cluster]:
         p.add_argument('--evaluation',type=str, default="no_markers", help='Evaluation model used(no_markers, markers110, markers35, default: nomarkers')
@@ -194,6 +228,8 @@ def parser_args():
                       help='Max contigs for CUDA recluster (0=auto from GPU VRAM; default: 0)')
         p.add_argument('--disable_cuda_fallback', action='store_true', default=False,
                       help='If set with CUDA recluster impls, fail instead of falling back to CPU recluster')
+        p.add_argument('--approx_threshold_pruning', action='store_true', default=False,
+                      help='Enable approximate threshold pruning and early-stop during optimized stage-2 candidate generation')
     # ===== add training args for bin mode =====
     bin_mode.add_argument('--epoch','-n', type=int, default=300,
                         help='training epoch (default: 300)')
@@ -209,10 +245,12 @@ def parser_args():
     cluster.add_argument('--embeddingdir','-e',default=None, help='The path of embedding csv file used in clustering')
     cluster.add_argument('--data',default=None, help='The path of training data')
     cluster.add_argument(
+        '--threads',
         '--num_process',
+        dest='threads',
         type=int,
-        default=10,
-        help='Number of threads used (default: 10)'
+        default=0,
+        help='Number of threads used (0=auto/all available cores)'
     )
     cluster.add_argument('--cuda', help = 'whether use cuda', required=False, action='store_true')
     cluster.add_argument('--batch_size', help = 'batch size (default: 64)', default=128)
@@ -241,9 +279,22 @@ def _log_runtime_details(logger, args):
     logger.info(
         f"runtime args: cluster_impl={getattr(args, 'cluster_impl', None)}, "
         f"recluster_impl={getattr(args, 'recluster_impl', None)}, "
+        f"threads={getattr(args, 'threads', None)}, "
         f"max_cuda_points={getattr(args, 'max_cuda_points', None)}, "
-        f"disable_cuda_fallback={getattr(args, 'disable_cuda_fallback', None)}"
+        f"disable_cuda_fallback={getattr(args, 'disable_cuda_fallback', None)}, "
+        f"approx_threshold_pruning={getattr(args, 'approx_threshold_pruning', None)}"
     )
+
+
+def _configure_logger(logger, log_path, formatter):
+    logger.handlers.clear()
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
 
 def main():
     args=parser_args()
@@ -252,50 +303,44 @@ def main():
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")# Set the log output format
     if args.cmd=="bin":
         if not check_generate_data(logger, args.fasta, args.bam, args.output):sys.exit()
-        file_handler = logging.FileHandler(f"{args.output}/LorBin.log") # Create a Handler object to control where the log is output
-        file_handler.setFormatter(formatter) 
-        logger.addHandler(file_handler)
+        _configure_logger(logger, f"{args.output}/LorBin.log", formatter)
         _log_runtime_details(logger, args)
-        generate_data(logger, args.fasta, args.bam, args.output, args.num_process)
-        generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
+        generate_data(logger, args.fasta, args.bam, args.output, args.threads)
+        generate_markers(logger, args.fasta, args.bin_length, args.threads, args.output)
         train_vae(logger,args.output, epoch=args.epoch)
         embeddingdir = f"{args.output}/embedding.csv"
         max_cuda_points = getattr(args, "max_cuda_points", 0)
         cuda_fallback = not getattr(args, "disable_cuda_fallback", False)
+        approximate_threshold_pruning = getattr(args, "approx_threshold_pruning", False)
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback, cluster_n_jobs=args.threads, approximate_threshold_pruning=approximate_threshold_pruning)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation, args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback, cluster_n_jobs=args.threads, approximate_threshold_pruning=approximate_threshold_pruning)
     elif args.cmd=='generate_data':
         if not check_generate_data(logger, args.fasta, args.bam, args.output):sys.exit()
-        file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
-        logger.addHandler(file_handler)
-        file_handler.setFormatter(formatter)
-        generate_data(logger, args.fasta, args.bam, args.output, args.num_process)
-        generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
+        _configure_logger(logger, f"{args.output}/LorBin.log", formatter)
+        generate_data(logger, args.fasta, args.bam, args.output, args.threads)
+        generate_markers(logger, args.fasta, args.bin_length, args.threads, args.output)
     elif args.cmd == 'train':
         check_train(logger, args.output)
-        file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
-        logger.addHandler(file_handler)
-        file_handler.setFormatter(formatter) 
+        _configure_logger(logger, f"{args.output}/LorBin.log", formatter)
         train_vae(logger, args.output,  args.batch_size, args.epoch, args.batchsteps, args.lrate, args.cuda, args.data)
     elif args.cmd=='cluster':
         if not check_cluster(logger, args.output, args.fasta, args.embeddingdir, args.data, args.evaluation, args.akeep):sys.exit()
-        file_handler = logging.FileHandler(f"{args.output}/LorBin.log") 
-        logger.addHandler(file_handler)
-        file_handler.setFormatter(formatter)
+        _configure_logger(logger, f"{args.output}/LorBin.log", formatter)
         _log_runtime_details(logger, args)
-        generate_markers(logger, args.fasta, args.bin_length, args.num_process, args.output)
+        generate_markers(logger, args.fasta, args.bin_length, args.threads, args.output)
         embeddingdir = args.embeddingdir
         if args.embeddingdir==None:
             train_vae(logger, args.output,  args.batch_size, args.epoch, args.batchsteps, args.lrate, args.cuda, args.data)
             embeddingdir = f'{args.output}/embedding.csv'
         max_cuda_points = getattr(args, "max_cuda_points", 0)
         cuda_fallback = not getattr(args, "disable_cuda_fallback", False)
+        approximate_threshold_pruning = getattr(args, "approx_threshold_pruning", False)
         if args.multi:
-            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
+            mcluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback, cluster_n_jobs=args.threads, approximate_threshold_pruning=approximate_threshold_pruning)
         else:
-            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback)
+            cluster(logger, args.output, args.fasta, embeddingdir, args.bin_length, args.evaluation,args.akeep, args.cluster_impl, args.recluster_impl, max_cuda_points, cuda_fallback, cluster_n_jobs=args.threads, approximate_threshold_pruning=approximate_threshold_pruning)
     elif args.cmd=='concat':
         concat(args.output,args.fasta)
     else:

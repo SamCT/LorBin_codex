@@ -149,6 +149,58 @@ def test_bin_max_cuda_points_default(monkeypatch):
     assert args.max_cuda_points == 0
 
 
+def test_bin_threads_default(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["LorBin", "bin", "-o", "out", "-fa", "input.fa", "-b", "input.bam"],
+    )
+    args = parser_args()
+    assert args.threads == 0
+
+
+def test_bin_threads_flag(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--threads",
+            "32",
+        ],
+    )
+    args = parser_args()
+    assert args.threads == 32
+
+
+def test_bin_num_process_alias_sets_threads(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--num_process",
+            "16",
+        ],
+    )
+    args = parser_args()
+    assert args.threads == 16
+
+
 def test_bin_disable_cuda_fallback_flag(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -167,3 +219,23 @@ def test_bin_disable_cuda_fallback_flag(monkeypatch):
     )
     args = parser_args()
     assert args.disable_cuda_fallback is True
+
+
+def test_bin_approx_threshold_pruning_flag(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--approx_threshold_pruning",
+        ],
+    )
+    args = parser_args()
+    assert args.approx_threshold_pruning is True

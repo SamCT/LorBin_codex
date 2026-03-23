@@ -116,7 +116,7 @@ LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl 
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
 ```
 ```angular2html
-usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
+usage: LorBin bin [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--threads THREADS] [--evaluation EVALUATION] [-a AKEEP] [--multi]
 
 options:
   -h, --help            show this help message and exit
@@ -128,8 +128,8 @@ options:
                         Minimum bin size in bps (Default: 80000)
   -b BAM [BAM ...], --bam BAM [BAM ...]
                         Path to the input BAM(.bam) file.
-  --num_process NUM_PROCESS
-                        Number of threads used (default: 10)
+  --threads THREADS, --num_process THREADS
+                        Number of threads used (0=auto/all available cores)
   --evaluation EVALUATION
                         Evaluation model used(no_markers, markers110, markers35, default: nomarkers
   -a AKEEP, --akeep AKEEP
@@ -146,7 +146,7 @@ If you only need the kmer and abundance data, you can use subcommand 'generate_d
 LorBin generate_data -o outputdir -fa path_to_all_contis -b test1.mapped.sorted.bam test2.mapped.sorted.bam
 ```
 ```angular2html
-usage: LorBin generate_data [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--num_process NUM_PROCESS]
+usage: LorBin generate_data [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] -b BAM [BAM ...] [--threads THREADS]
 
 options:
   -h, --help            show this help message and exit
@@ -158,8 +158,8 @@ options:
                         Minimum bin size in bps (Default: 80000)
   -b BAM [BAM ...], --bam BAM [BAM ...]
                         Path to the input BAM(.bam) file.
-  --num_process NUM_PROCESS
-                        Number of threads used (default: 10)
+  --threads THREADS, --num_process THREADS
+                        Number of threads used (0=auto/all available cores)
 ```
 If you want to train your model more finely, you can use subcommand 'train'
 ```angular2html
@@ -188,7 +188,7 @@ If you have the embedded features of contigs and only want to use the two-stage 
 LorBin cluster -o outputdir -fa path_to_all_contigs --embedding path/embedding.csv
 ```
 ```angular2html
-usage: LorBin cluster [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] [--evaluation EVALUATION] [-a AKEEP] [--multi] --embeddingdir EMBEDDINGDIR [--num_process NUM_PROCESS]
+usage: LorBin cluster [-h] -o OUTPUT -fa FASTA [--bin_length BIN_LENGTH] [--evaluation EVALUATION] [-a AKEEP] [--multi] --embeddingdir EMBEDDINGDIR [--threads THREADS]
 
 options:
   -h, --help            show this help message and exit
@@ -209,8 +209,8 @@ options:
                         Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
-  --num_process NUM_PROCESS
-                        Number of threads used (default: 10)
+  --threads THREADS, --num_process THREADS
+                        Number of threads used (0=auto/all available cores)
 ```
 ### Troubleshooting CUDA recluster
 If you still see old stack traces (for example errors at `resultpool.append(res)`), you may be running an older installed package instead of this checkout.
@@ -262,4 +262,3 @@ For correctness parity, `birch_cuda` currently uses the same sklearn BIRCH candi
 [1] Pan, S., Zhao, X.-M. & Coelho, L. P. SemiBin2: self-supervised contrastive learning leads to better MAGs for short- and long-read sequencing. Bioinformatics 39, i21–i29 (2023).   
 [2] Nissen, J. N. et al. Improved metagenome binning and assembly using deep variational autoencoders. Nat Biotechnol 39, 555–560 (2021).
 [3] Wang, Z. et al. Effective binning of metagenomic contigs using contrastive multi-view representation learning. Nat Commun 15, 585 (2024).
-
