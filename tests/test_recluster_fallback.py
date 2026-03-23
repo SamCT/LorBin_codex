@@ -352,3 +352,64 @@ def test_birch_cuda_uses_cpu_original_candidate_builder(monkeypatch):
     assert captured["latent_shape"] == latent.shape
     assert captured["idx"] == recluster_index
     assert captured["threds"] == thresholds
+
+
+def test_optimized_2_recluster_honors_keep_and_continues(monkeypatch):
+    latent = np.array([[float(i), 0.0] for i in range(6)], dtype=np.float32)
+    contig_all = np.array([f"c{i}" for i in range(6)])
+    contig_list = contig_all.tolist()
+    contig_dict = {name: "A" * 2000 for name in contig_list}
+    contig2marker = {name: ["m1"] for name in contig_list}
+
+    class DummyModel:
+        def load_state_dict(self, _):
+            return None
+
+        def __call__(self, _):
+            return 1.0
+
+    monkeypatch.setattr(cluster_mod, "EvaluationModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod, "KeepModel", lambda *_: DummyModel())
+    monkeypatch.setattr(cluster_mod.torch, "load", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cluster_mod, "DBSCAN", lambda *a, **k: type("D", (), {"fit": lambda self, *_a, **_k: self, "labels_": np.full(len(latent), -1, dtype=int)})())
+    monkeypatch.setattr(cluster_mod, "_compute_stage2_thresholds_optimized_2", lambda _dist: [0.25, 0.5])
+    monkeypatch.setattr(cluster_mod, "_build_recluster_pool_birch_cpu", lambda *_a, **_k: [[0, 1, 2], [3, 4, 5]])
+
+    selections = iter([([0, 1, 2], False), ([3, 4, 5], True)])
+    calls = {"count": 0}
+
+    def fake_get_bin_best(_keepmodel, _evaluationmodel, resultpool, *_args, **_kwargs):
+        assert all(isinstance(pool, set) for pool in resultpool)
+        calls["count"] += 1
+        try:
+            return next(selections)
+        except StopIteration:
+            return None
+
+    monkeypatch.setattr(cluster_mod, "get_bin_best", fake_get_bin_best)
+
+    class DummyLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    labels, keep = cluster_mod.bin_cluster(
+        DummyLogger(),
+        latent,
+        contig2marker,
+        contig_dict,
+        contig_list,
+        contig_all,
+        minfasta=10_000_000,
+        feature="no_markers",
+        a=0.6,
+        cluster_impl="optimized",
+        recluster_impl="optimized_2",
+    )
+
+    assert calls["count"] == 2
+    assert labels[:3] == [-1, -1, -1]
+    assert labels[3:] == [0, 0, 0]
+    assert isinstance(keep, list)

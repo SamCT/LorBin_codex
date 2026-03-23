@@ -239,3 +239,24 @@ def test_bin_approx_threshold_pruning_flag(monkeypatch):
     )
     args = parser_args()
     assert args.approx_threshold_pruning is True
+
+
+def test_bin_recluster_impl_optimized_2(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--recluster_impl",
+            "optimized_2",
+        ],
+    )
+    args = parser_args()
+    assert args.recluster_impl == "optimized_2"

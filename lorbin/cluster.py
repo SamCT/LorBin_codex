@@ -99,110 +99,115 @@ def _update_candidate_stat_for_removed_contig(candidate_stat, contig_marker_coun
 
 
 
-def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6, candidate_cache=None):
-    with torch.no_grad():
-        for max_contamination in [0.1, 0.2, 0.3,0.4, 0.5,1]:
-            max_F1 = 0
-            weight_of_max = 1e9
-            max_bin = None
-            bin_recall = 0
-            bin_contamination = 0
+def _collect_candidate_features(resultpool, contig_to_marker, namelist, contig_dict, minfasta, candidate_cache=None):
+    candidates = []
+    feature_rows = []
+    for pool_index, bin_contig_index in enumerate(resultpool):
+        if not bin_contig_index:
+            continue
+        stats = candidate_cache[pool_index] if candidate_cache is not None else None
+        cur_weight = stats["total_bp"] if stats is not None else sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
+        if cur_weight < minfasta:
+            continue
+        if stats is not None:
+            unique_marker_count = stats["unique_marker_count"]
+            total_marker_count = stats["total_marker_count"]
+            marker_sentence = _marker_counter_to_sentence(stats["marker_counts"])
+        else:
+            marker_list = []
+            for contig_index in bin_contig_index:
+                marker_list.extend(contig_to_marker[namelist[contig_index]])
+            total_marker_count = len(marker_list)
+            unique_marker_count = len(set(marker_list))
+            marker_sentence = " ".join(marker_list)
+        if total_marker_count == 0:
+            continue
+        recall = unique_marker_count / 107
+        contamination = (total_marker_count - unique_marker_count) / total_marker_count
+        candidates.append((bin_contig_index, cur_weight, recall, contamination, marker_sentence))
+        feature_rows.append([recall, 1 - contamination, abs(recall - 1 + contamination)])
+    return candidates, feature_rows
 
-            for pool_index, bin_contig_index in enumerate(resultpool):
-                stats = candidate_cache[pool_index] if candidate_cache is not None else None
-                cur_weight = stats["total_bp"] if stats is not None else sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
-                if cur_weight < minfasta:
-                    continue
-                if stats is not None:
-                    unique_marker_count = stats["unique_marker_count"]
-                    total_marker_count = stats["total_marker_count"]
-                else:
-                    marker_list = []
-                    for contig_index in bin_contig_index:
-                        marker_list.extend(contig_to_marker[namelist[contig_index]])
-                    unique_marker_count = len(set(marker_list))
-                    total_marker_count = len(marker_list)
-                if total_marker_count == 0:
-                    continue
-                recall = unique_marker_count / 107
-                contamination = (total_marker_count - unique_marker_count) / total_marker_count
-                if contamination <= max_contamination:
-                    F1 = (evaluationmodel(torch.Tensor([[recall, 1 - contamination, abs(recall - 1 + contamination)]])))
-                    if F1 > max_F1:
-                        max_F1 = F1
-                        weight_of_max = cur_weight
-                        max_bin = bin_contig_index
-                        bin_recall = recall
-                        bin_contamination = contamination
-                    elif F1 == max_F1 and cur_weight <= weight_of_max:
-                        weight_of_max = cur_weight
-                        max_bin = bin_contig_index
-                        bin_recall = recall
-                        bin_contamination = contamination
-            if max_F1 > 0:  # if there is a bin with F1 > 0
-                keep = keepmodel(torch.Tensor([[bin_recall, 1 - bin_contamination, abs(bin_recall - 1 + bin_contamination)]]))
-                keep = bool(keep.item() > a)
-                return max_bin, keep
+
+def _select_best_candidate(candidates, scores):
+    for max_contamination in (0.1, 0.2, 0.3, 0.4, 0.5, 1.0):
+        best = None
+        for candidate, score in zip(candidates, scores):
+            pool, cur_weight, recall, contamination, marker_sentence = candidate
+            if contamination > max_contamination:
+                continue
+            if score <= 0:
+                continue
+            if best is None or score > best[0] or (score == best[0] and cur_weight <= best[1]):
+                best = (score, cur_weight, pool, recall, contamination, marker_sentence)
+        if best is not None:
+            return best
+    return None
+
+
+def _l2_normalize_rows(matrix):
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
+def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6, candidate_cache=None):
+    candidates, feature_rows = _collect_candidate_features(
+        resultpool,
+        contig_to_marker,
+        namelist,
+        contig_dict,
+        minfasta,
+        candidate_cache=candidate_cache,
+    )
+    if not candidates:
+        return None
+
+    with torch.no_grad():
+        features = torch.tensor(feature_rows, dtype=torch.float32)
+        scores = evaluationmodel(features).detach().cpu().numpy().reshape(-1).tolist()
+        best = _select_best_candidate(candidates, scores)
+        if best is None:
+            return None
+        _, _, max_bin, bin_recall, bin_contamination, _marker_sentence = best
+        keep = keepmodel(torch.tensor([[bin_recall, 1 - bin_contamination, abs(bin_recall - 1 + bin_contamination)]], dtype=torch.float32))
+        keep = bool(keep.item() > a)
+        return list(max_bin), keep
+
 
 def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transformer, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6, candidate_cache=None):
+    del tfidf_transformer
+    candidates, feature_rows = _collect_candidate_features(
+        resultpool,
+        contig_to_marker,
+        namelist,
+        contig_dict,
+        minfasta,
+        candidate_cache=candidate_cache,
+    )
+    if not candidates:
+        return None
+
+    marker_sentences = [candidate[-1] for candidate in candidates]
+    marker_features = vectorizer.transform(marker_sentences).toarray().astype(np.float32, copy=False)
+    marker_features = _l2_normalize_rows(marker_features)
+    x_in = np.concatenate((np.asarray(feature_rows, dtype=np.float32), marker_features), axis=1)
+
     with torch.no_grad():
-        for max_contamination in [0.1, 0.2, 0.3,0.4, 0.5,1]:
-            max_F1 = 0
-            weight_of_max = 1e9
-            max_bin = None
-            bin_recall = 0
-            bin_contamination = 0
-
-            for pool_index, bin_contig_index in enumerate(resultpool):
-                stats = candidate_cache[pool_index] if candidate_cache is not None else None
-                cur_weight = stats["total_bp"] if stats is not None else sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
-                if cur_weight < minfasta:
-                    continue
-                if stats is not None:
-                    total_marker_count = stats["total_marker_count"]
-                    unique_marker_count = stats["unique_marker_count"]
-                    marker_sentence = _marker_counter_to_sentence(stats["marker_counts"])
-                else:
-                    marker_list = []
-                    for contig_index in bin_contig_index:
-                        marker_list.extend(contig_to_marker[namelist[contig_index]])
-                    total_marker_count = len(marker_list)
-                    unique_marker_count = len(set(marker_list))
-                    marker_sentence = " ".join(marker_list)
-                if total_marker_count == 0:
-                    continue
-                X = vectorizer.transform([marker_sentence])
-                X = X.toarray()
-                X_tfidf = tfidf_transformer.fit_transform(X)
-                X = X_tfidf.toarray()
-
-                recall = unique_marker_count / 107
-                contamination = (total_marker_count - unique_marker_count) / total_marker_count
-                if contamination <= max_contamination:
-                    x_in1 = np.array([[recall, 1 - contamination, abs(recall - 1 + contamination)]])
-                    x_in = np.concatenate((x_in1, X), axis=1)
-                    x_in = torch.from_numpy(x_in).float()
-                    F1 = evaluationmodel(x_in)
-                    if F1 > max_F1:
-                        max_F1 = F1
-                        weight_of_max = cur_weight
-                        max_bin = bin_contig_index
-                        bin_recall = recall
-                        bin_contamination = contamination
-                        bin_x = X
-                    elif F1 == max_F1 and cur_weight <= weight_of_max:
-                        weight_of_max = cur_weight
-                        max_bin = bin_contig_index
-                        bin_recall = recall
-                        bin_contamination = contamination
-                        bin_x = X
-            if max_F1 > 0:
-                x_in1 = np.array([[bin_recall, 1 - bin_contamination, abs(bin_recall - 1 + bin_contamination)]])
-                x_in = np.concatenate((x_in1, bin_x), axis=1)
-                x_in = torch.from_numpy(x_in).float()
-                keep = keepmodel(x_in)
-                keep = bool(keep.item() > a)
-                return max_bin, keep
+        scores = evaluationmodel(torch.from_numpy(x_in)).detach().cpu().numpy().reshape(-1).tolist()
+        best = _select_best_candidate(candidates, scores)
+        if best is None:
+            return None
+        _, _, max_bin, bin_recall, bin_contamination, marker_sentence = best
+        best_marker_features = vectorizer.transform([marker_sentence]).toarray().astype(np.float32, copy=False)
+        best_marker_features = _l2_normalize_rows(best_marker_features)
+        keep_x = np.concatenate((
+            np.array([[bin_recall, 1 - bin_contamination, abs(bin_recall - 1 + bin_contamination)]], dtype=np.float32),
+            best_marker_features,
+        ), axis=1)
+        keep = keepmodel(torch.from_numpy(keep_x))
+        keep = bool(keep.item() > a)
+        return list(max_bin), keep
 
 
 def _prune_resultpool_original(resultpool, selected_contigs, candidate_cache=None, contig_bp=None, contig_marker_counts=None):
@@ -256,6 +261,141 @@ def _prune_resultpool_optimized(resultpool, selected_contigs, candidate_cache=No
 
 def _get_total_bp(contig_names, contig_dict):
     return sum(len(contig_dict[name]) for name in contig_names)
+
+
+def _compute_stage2_thresholds_original(p2_distance, recluster_latent, min_k_2):
+    eps_p2_2 = []
+    for k in range(5, min(80, min_k_2), 10):
+        eps_value = np.partition(p2_distance, recluster_latent.shape[0] * k - 1)[recluster_latent.shape[0] * k - 1]
+        eps_p2_2.append(math.floor(0.8 * eps_value))
+        eps_p2_2.append(math.floor(eps_value))
+        eps_p2_2.append(math.floor(1.2 * eps_value))
+    eps_p2_2 = sorted(set(eps_p2_2))
+    if not eps_p2_2:
+        return []
+    thresholds = eps_p2_2 + [0.1 * eps_p2_2[0], 0.3 * eps_p2_2[0], 0.5 * eps_p2_2[0], 10, 15, 30]
+    thresholds.sort()
+    return thresholds
+
+
+def _compute_stage2_thresholds_optimized_2(p2_distance):
+    positive = np.asarray(p2_distance, dtype=np.float64)
+    positive = positive[positive > 0]
+    if positive.size == 0:
+        return []
+    quantiles = np.quantile(positive, [0.01, 0.03, 0.05, 0.08, 0.12, 0.20])
+    return _normalize_thresholds(quantiles.tolist())
+
+
+def _prune_resultpool_reverse_index(resultpool, pools_by_contig, selected_contigs, candidate_cache=None, contig_bp=None, contig_marker_counts=None):
+    for contig_index in selected_contigs:
+        for pool_index in pools_by_contig.get(contig_index, ()):
+            pool = resultpool[pool_index]
+            if contig_index not in pool:
+                continue
+            pool.discard(contig_index)
+            if candidate_cache is not None:
+                _update_candidate_stat_for_removed_contig(
+                    candidate_cache[pool_index],
+                    contig_marker_counts[contig_index],
+                    contig_bp[contig_index],
+                )
+
+
+def _run_stage2_selection_optimized_2(
+    extracted,
+    resultpool,
+    recluster_index,
+    contig2marker,
+    contig_all,
+    contig_dict,
+    minfasta,
+    feature,
+    a,
+    model1,
+    model2,
+    vectorizer=None,
+    tfidf_transformer=None,
+    contig_bp=None,
+    contig_marker_counts=None,
+):
+    resultpool = [set(pool) for pool in resultpool if pool]
+    if not resultpool:
+        return
+
+    pools_by_contig = defaultdict(list)
+    for pool_index, pool in enumerate(resultpool):
+        for contig_index in pool:
+            pools_by_contig[contig_index].append(pool_index)
+
+    candidate_cache, _, _ = _build_candidate_cache(
+        resultpool,
+        contig2marker,
+        contig_all,
+        contig_dict,
+    )
+    remaining = set(recluster_index)
+    remaining_bp = sum(contig_bp[idx] for idx in remaining)
+    keep_count = 0
+
+    while remaining_bp >= minfasta and resultpool:
+        if len(remaining) == 1:
+            extracted.append(list(remaining))
+            break
+
+        if feature == "no_markers":
+            max_bin = get_bin_best(
+                model2,
+                model1,
+                resultpool,
+                contig2marker,
+                contig_all,
+                contig_dict,
+                minfasta,
+                a,
+                candidate_cache=candidate_cache,
+            )
+        else:
+            max_bin = get_bin_best_markers(
+                model2,
+                model1,
+                vectorizer,
+                tfidf_transformer,
+                resultpool,
+                contig2marker,
+                contig_all,
+                contig_dict,
+                minfasta,
+                a,
+                candidate_cache=candidate_cache,
+            )
+        if not max_bin or keep_count > 100:
+            break
+
+        max_bin, keep = max_bin
+        if keep:
+            extracted.append(list(max_bin))
+            keep_count = 0
+        else:
+            keep_count += 1
+
+        selected_contigs = [idx for idx in max_bin if idx in remaining]
+        if not selected_contigs:
+            keep_count += 1
+            continue
+
+        for contig_index in selected_contigs:
+            remaining.remove(contig_index)
+            remaining_bp -= contig_bp[contig_index]
+
+        _prune_resultpool_reverse_index(
+            resultpool,
+            pools_by_contig,
+            selected_contigs,
+            candidate_cache=candidate_cache,
+            contig_bp=contig_bp,
+            contig_marker_counts=contig_marker_counts,
+        )
 
 
 def _connected_components_from_adjacency(adj):
@@ -611,7 +751,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         cuda_fallback = True
 
     use_optimized = cluster_impl == "optimized"
-    use_recluster_optimized = recluster_impl in {"optimized", "cuda", "birch_cuda", "graph_cuda"}
+    use_recluster_optimized = recluster_impl in {"optimized", "optimized_2", "cuda", "birch_cuda", "graph_cuda"}
 
     result_dict = {}
     # create BIRCH
@@ -801,23 +941,14 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
 
     p2_distance = dist_matrix.data
-    eps_p2_2=[]
-
-
     resultpool = []
-    for k in range(5,min(80,min_k_2),10):
-        eps_value=np.partition(p2_distance,recluster_latent.shape[0]*k-1)[recluster_latent.shape[0]*k-1]
-        eps_p2_2.append(math.floor(0.8*eps_value))
-        eps_p2_2.append(math.floor(eps_value))
-        eps_p2_2.append(math.floor(1.2*eps_value))
-    eps_p2_2 = list(set(eps_p2_2))
-    eps_p2_2.sort()
+    if recluster_impl == "optimized_2":
+        threds = _compute_stage2_thresholds_optimized_2(p2_distance)
+    else:
+        threds = _compute_stage2_thresholds_original(p2_distance, recluster_latent, min_k_2)
 
-    if not eps_p2_2:
+    if not threds:
         return contig_labels,keep_label
-
-    threds =eps_p2_2 +[0.1*eps_p2_2[0],0.3*eps_p2_2[0],0.5*eps_p2_2[0],10,15,30]
-    threds.sort()
 
     if recluster_impl == "cuda":
         logger.warning("recluster_impl=cuda is a legacy alias that now uses the optimized CPU BIRCH path; use birch_cuda or graph_cuda for CUDA-gated reclustering")
@@ -890,36 +1021,66 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             n_jobs=cluster_n_jobs,
             approximate_threshold_pruning=approximate_threshold_pruning,
         )
+    elif recluster_impl == "optimized_2":
+        logger.info(
+            f"stage2_points={len(recluster_index)} effective_max_cuda_points=n/a builder=optimized_2"
+        )
+        resultpool = _build_recluster_pool_birch_cpu(
+            recluster_latent,
+            recluster_index,
+            threds,
+            n_jobs=cluster_n_jobs,
+            approximate_threshold_pruning=True,
+        )
     if not resultpool:
         return contig_labels,keep_label
 
     minfasta = 1500
-    recluster_remaining_bp = _get_total_bp(recluster_list, contig_dict)
-    candidate_cache, _, _ = _build_candidate_cache(
-        resultpool,
-        contig2marker,
-        contig_all,
-        contig_dict,
-    )
-    while recluster_remaining_bp >= minfasta:
-        if len(recluster_list) == 1:
-            extracted.append(recluster_index)
-            break
+    if recluster_impl == "optimized_2":
+        _run_stage2_selection_optimized_2(
+            extracted,
+            resultpool,
+            recluster_index,
+            contig2marker,
+            contig_all,
+            contig_dict,
+            minfasta,
+            feature,
+            a,
+            model1,
+            model2,
+            vectorizer=vectorizer if feature != "no_markers" else None,
+            tfidf_transformer=tfidf_transformer if feature != "no_markers" else None,
+            contig_bp=contig_bp,
+            contig_marker_counts=contig_marker_counts,
+        )
+    else:
+        recluster_remaining_bp = _get_total_bp(recluster_list, contig_dict)
+        candidate_cache, _, _ = _build_candidate_cache(
+            resultpool,
+            contig2marker,
+            contig_all,
+            contig_dict,
+        )
+        while recluster_remaining_bp >= minfasta:
+            if len(recluster_list) == 1:
+                extracted.append(recluster_index)
+                break
 
-        if feature=="no_markers":
-            max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
-        else:
-            max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
-        if not max_bin:
-            break
-        max_bin, keep = max_bin
+            if feature=="no_markers":
+                max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
+            else:
+                max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
+            if not max_bin:
+                break
+            max_bin, keep = max_bin
 
-        extracted.append(max_bin.copy())
-        recluster_remaining_bp -= sum(contig_bp[idx] for idx in max_bin)
-        if use_recluster_optimized:
-            _prune_resultpool_optimized(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
-        else:
-            _prune_resultpool_original(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
+            extracted.append(max_bin.copy())
+            recluster_remaining_bp -= sum(contig_bp[idx] for idx in max_bin)
+            if use_recluster_optimized:
+                _prune_resultpool_optimized(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
+            else:
+                _prune_resultpool_original(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
     contig2ix = {}
     for i, cs in enumerate(extracted):
         for c in cs:
