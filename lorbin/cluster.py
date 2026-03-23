@@ -1,4 +1,6 @@
 from collections import defaultdict
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import torch
 from Bio import SeqIO
@@ -27,9 +29,77 @@ warnings.filterwarnings(
 )
 
 
+def _normalize_n_jobs(n_jobs):
+    if n_jobs is None:
+        return None
+    if int(n_jobs) == 0:
+        return -1
+    return int(n_jobs)
 
 
-def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6):
+def _effective_worker_count(n_jobs, task_count):
+    normalized = _normalize_n_jobs(n_jobs)
+    if task_count <= 1:
+        return 1
+    if normalized is None:
+        return 1
+    if normalized < 0:
+        return max(1, min(task_count, os.cpu_count() or 1))
+    return max(1, min(task_count, normalized))
+
+
+def _counter_from_markers(markers):
+    return Counter(markers) if markers else Counter()
+
+
+def _build_candidate_cache(resultpool, contig_to_marker, namelist, contig_dict):
+    contig_bp = [len(contig_dict[name]) for name in namelist]
+    contig_marker_counts = [
+        _counter_from_markers(contig_to_marker.get(name, ()))
+        for name in namelist
+    ]
+    candidate_cache = []
+    for bin_contig_index in resultpool:
+        total_bp = 0
+        marker_counts = Counter()
+        for contig_index in bin_contig_index:
+            total_bp += contig_bp[contig_index]
+            marker_counts.update(contig_marker_counts[contig_index])
+        candidate_cache.append(
+            {
+                "total_bp": total_bp,
+                "marker_counts": marker_counts,
+                "unique_marker_count": len(marker_counts),
+                "total_marker_count": sum(marker_counts.values()),
+            }
+        )
+    return candidate_cache, contig_bp, contig_marker_counts
+
+
+def _marker_counter_to_sentence(marker_counts):
+    parts = []
+    for marker, count in marker_counts.items():
+        parts.extend([marker] * count)
+    return " ".join(parts)
+
+
+def _update_candidate_stat_for_removed_contig(candidate_stat, contig_marker_count, contig_bp):
+    candidate_stat["total_bp"] -= contig_bp
+    if contig_marker_count:
+        marker_counts = candidate_stat["marker_counts"]
+        for marker, count in contig_marker_count.items():
+            remaining = marker_counts.get(marker, 0) - count
+            if remaining > 0:
+                marker_counts[marker] = remaining
+            elif marker in marker_counts:
+                del marker_counts[marker]
+        candidate_stat["unique_marker_count"] = len(marker_counts)
+        candidate_stat["total_marker_count"] = sum(marker_counts.values())
+
+
+
+
+def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6, candidate_cache=None):
     with torch.no_grad():
         for max_contamination in [0.1, 0.2, 0.3,0.4, 0.5,1]:
             max_F1 = 0
@@ -38,17 +108,24 @@ def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, nameli
             bin_recall = 0
             bin_contamination = 0
 
-            for bin_contig_index in resultpool:
-                cur_weight = sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
+            for pool_index, bin_contig_index in enumerate(resultpool):
+                stats = candidate_cache[pool_index] if candidate_cache is not None else None
+                cur_weight = stats["total_bp"] if stats is not None else sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
                 if cur_weight < minfasta:
                     continue
-                marker_list = []
-                for contig_index in bin_contig_index:
-                    marker_list.extend(contig_to_marker[namelist[contig_index]])
-                if len(marker_list) == 0:
+                if stats is not None:
+                    unique_marker_count = stats["unique_marker_count"]
+                    total_marker_count = stats["total_marker_count"]
+                else:
+                    marker_list = []
+                    for contig_index in bin_contig_index:
+                        marker_list.extend(contig_to_marker[namelist[contig_index]])
+                    unique_marker_count = len(set(marker_list))
+                    total_marker_count = len(marker_list)
+                if total_marker_count == 0:
                     continue
-                recall = len(set(marker_list)) / 107
-                contamination = (len(marker_list) - len(set(marker_list))) / len(marker_list)
+                recall = unique_marker_count / 107
+                contamination = (total_marker_count - unique_marker_count) / total_marker_count
                 if contamination <= max_contamination:
                     F1 = (evaluationmodel(torch.Tensor([[recall, 1 - contamination, abs(recall - 1 + contamination)]])))
                     if F1 > max_F1:
@@ -67,7 +144,7 @@ def get_bin_best(keepmodel,evaluationmodel, resultpool, contig_to_marker, nameli
                 keep = bool(keep.item() > a)
                 return max_bin, keep
 
-def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transformer, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6):
+def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transformer, resultpool, contig_to_marker, namelist, contig_dict, minfasta,a=0.6, candidate_cache=None):
     with torch.no_grad():
         for max_contamination in [0.1, 0.2, 0.3,0.4, 0.5,1]:
             max_F1 = 0
@@ -76,23 +153,31 @@ def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transforme
             bin_recall = 0
             bin_contamination = 0
 
-            for bin_contig_index in resultpool:
-                cur_weight = sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
+            for pool_index, bin_contig_index in enumerate(resultpool):
+                stats = candidate_cache[pool_index] if candidate_cache is not None else None
+                cur_weight = stats["total_bp"] if stats is not None else sum(len(contig_dict[namelist[contig_index]]) for contig_index in bin_contig_index)
                 if cur_weight < minfasta:
                     continue
-                marker_list = []
-                for contig_index in bin_contig_index:
-                    marker_list.extend(contig_to_marker[namelist[contig_index]])
-                if len(marker_list) == 0:
+                if stats is not None:
+                    total_marker_count = stats["total_marker_count"]
+                    unique_marker_count = stats["unique_marker_count"]
+                    marker_sentence = _marker_counter_to_sentence(stats["marker_counts"])
+                else:
+                    marker_list = []
+                    for contig_index in bin_contig_index:
+                        marker_list.extend(contig_to_marker[namelist[contig_index]])
+                    total_marker_count = len(marker_list)
+                    unique_marker_count = len(set(marker_list))
+                    marker_sentence = " ".join(marker_list)
+                if total_marker_count == 0:
                     continue
-                sentence = ' '.join(marker_list)
-                X = vectorizer.transform([sentence])
+                X = vectorizer.transform([marker_sentence])
                 X = X.toarray()
                 X_tfidf = tfidf_transformer.fit_transform(X)
                 X = X_tfidf.toarray()
 
-                recall = len(set(marker_list)) / 107
-                contamination = (len(marker_list) - len(set(marker_list))) / len(marker_list)
+                recall = unique_marker_count / 107
+                contamination = (total_marker_count - unique_marker_count) / total_marker_count
                 if contamination <= max_contamination:
                     x_in1 = np.array([[recall, 1 - contamination, abs(recall - 1 + contamination)]])
                     x_in = np.concatenate((x_in1, X), axis=1)
@@ -120,24 +205,53 @@ def get_bin_best_markers(keepmodel,evaluationmodel, vectorizer, tfidf_transforme
                 return max_bin, keep
 
 
-def _prune_resultpool_original(resultpool, selected_contigs):
+def _prune_resultpool_original(resultpool, selected_contigs, candidate_cache=None, contig_bp=None, contig_marker_counts=None):
     for temp in selected_contigs:
-        for result in resultpool:
+        for pool_index, result in enumerate(resultpool):
             while temp in result:
                 result.remove(temp)
+                if candidate_cache is not None:
+                    _update_candidate_stat_for_removed_contig(
+                        candidate_cache[pool_index],
+                        contig_marker_counts[temp],
+                        contig_bp[temp],
+                    )
+    if candidate_cache is not None:
+        for pool_index in range(len(candidate_cache) - 1, -1, -1):
+            if not resultpool[pool_index]:
+                del resultpool[pool_index]
+                del candidate_cache[pool_index]
 
 
-def _prune_resultpool_optimized(resultpool, selected_contigs):
+def _prune_resultpool_optimized(resultpool, selected_contigs, candidate_cache=None, contig_bp=None, contig_marker_counts=None):
     to_remove = set(selected_contigs)
     write_index = 0
-    for result in resultpool:
+    for read_index, result in enumerate(resultpool):
         if not result:
             continue
-        pruned = [idx for idx in result if idx not in to_remove]
+        pruned = []
+        if candidate_cache is not None:
+            candidate_stat = candidate_cache[read_index]
+        else:
+            candidate_stat = None
+        for idx in result:
+            if idx in to_remove:
+                if candidate_stat is not None:
+                    _update_candidate_stat_for_removed_contig(
+                        candidate_stat,
+                        contig_marker_counts[idx],
+                        contig_bp[idx],
+                    )
+                continue
+            pruned.append(idx)
         if pruned:
             resultpool[write_index] = pruned
+            if candidate_cache is not None:
+                candidate_cache[write_index] = candidate_stat
             write_index += 1
     del resultpool[write_index:]
+    if candidate_cache is not None:
+        del candidate_cache[write_index:]
 
 
 def _get_total_bp(contig_names, contig_dict):
@@ -171,6 +285,20 @@ def _normalize_thresholds(thresholds):
     return normalized
 
 
+def _prepare_thresholds(thresholds, approximate_pruning=False, relative_tolerance=0.05):
+    normalized = _normalize_thresholds(thresholds)
+    if not approximate_pruning or not normalized:
+        return normalized
+
+    pruned = [normalized[0]]
+    for threshold in normalized[1:]:
+        prev = pruned[-1]
+        denom = max(abs(prev), 1e-9)
+        if abs(threshold - prev) / denom > relative_tolerance:
+            pruned.append(threshold)
+    return pruned
+
+
 def _dedupe_resultpool(resultpool):
     if not resultpool:
         return []
@@ -186,12 +314,52 @@ def _labels_to_resultpool(labels, recluster_index):
     return list(grouped.values())
 
 
-def _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, thresholds):
+def _birch_result_for_threshold(threshold, recluster_latent, recluster_index):
+    birch = Birch(threshold=threshold, n_clusters=None, branching_factor=50)
+    labels = birch.fit_predict(recluster_latent)
+    return _labels_to_resultpool(labels, recluster_index)
+
+
+def _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, thresholds, n_jobs=None, approximate_threshold_pruning=False):
     resultpool = []
-    for threshold in _normalize_thresholds(thresholds):
-        birch = Birch(threshold=threshold, n_clusters=None, branching_factor=50)
-        labels = birch.fit_predict(recluster_latent)
-        resultpool.extend(_labels_to_resultpool(labels, recluster_index))
+    prepared_thresholds = _prepare_thresholds(
+        thresholds,
+        approximate_pruning=approximate_threshold_pruning,
+    )
+    max_workers = _effective_worker_count(n_jobs, len(prepared_thresholds))
+    no_new_candidate_rounds = 0
+
+    def extend_with_candidate_batches(candidate_batches):
+        nonlocal no_new_candidate_rounds
+        before = len(resultpool)
+        for batch in candidate_batches:
+            resultpool.extend(batch)
+        resultpool[:] = _dedupe_resultpool(resultpool)
+        if len(resultpool) == before:
+            no_new_candidate_rounds += 1
+        else:
+            no_new_candidate_rounds = 0
+
+    if max_workers == 1:
+        for threshold in prepared_thresholds:
+            extend_with_candidate_batches(
+                [_birch_result_for_threshold(threshold, recluster_latent, recluster_index)]
+            )
+            if approximate_threshold_pruning and no_new_candidate_rounds >= 3:
+                break
+        return resultpool
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        pending = []
+        for threshold in prepared_thresholds:
+            pending.append(executor.submit(_birch_result_for_threshold, threshold, recluster_latent, recluster_index))
+            if len(pending) >= max_workers:
+                extend_with_candidate_batches([future.result() for future in pending])
+                pending = []
+                if approximate_threshold_pruning and no_new_candidate_rounds >= 3:
+                    break
+        if pending:
+            extend_with_candidate_batches([future.result() for future in pending])
     return _dedupe_resultpool(resultpool)
 
 
@@ -258,7 +426,7 @@ def _resolve_cuda_point_limit(logger, recluster_impl, recluster_latent, max_cuda
     return requested
 
 
-def _build_recluster_pool_graph_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
+def _build_recluster_pool_graph_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True, effective_max_cuda_points=None):
     if not torch.cuda.is_available():
         msg = "recluster_impl=graph_cuda requested but CUDA is unavailable"
         if cuda_fallback:
@@ -266,14 +434,15 @@ def _build_recluster_pool_graph_cuda(logger, recluster_latent, recluster_index, 
             return None
         raise RuntimeError(msg)
 
-    effective_max_cuda_points = _resolve_cuda_point_limit(
-        logger,
-        "graph_cuda",
-        recluster_latent,
-        max_cuda_points,
-        dtype_bytes=4,
-        quadratic=True,
-    )
+    if effective_max_cuda_points is None:
+        effective_max_cuda_points = _resolve_cuda_point_limit(
+            logger,
+            "graph_cuda",
+            recluster_latent,
+            max_cuda_points,
+            dtype_bytes=4,
+            quadratic=True,
+        )
 
     n_points = recluster_latent.shape[0]
     if n_points > effective_max_cuda_points:
@@ -388,7 +557,7 @@ class _CFTreeGPU:
         return np.array(self.assignments, dtype=int)
 
 
-def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
+def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True, effective_max_cuda_points=None):
     if not torch.cuda.is_available():
         msg = "recluster_impl=birch_cuda requested but CUDA is unavailable"
         if cuda_fallback:
@@ -396,14 +565,15 @@ def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, 
             return None
         raise RuntimeError(msg)
 
-    effective_max_cuda_points = _resolve_cuda_point_limit(
-        logger,
-        "birch_cuda",
-        recluster_latent,
-        max_cuda_points,
-        dtype_bytes=8,
-        quadratic=False,
-    )
+    if effective_max_cuda_points is None:
+        effective_max_cuda_points = _resolve_cuda_point_limit(
+            logger,
+            "birch_cuda",
+            recluster_latent,
+            max_cuda_points,
+            dtype_bytes=8,
+            quadratic=False,
+        )
 
     n_points = recluster_latent.shape[0]
     if n_points > effective_max_cuda_points:
@@ -421,7 +591,7 @@ def _build_recluster_pool_birch_cuda(logger, recluster_latent, recluster_index, 
     return _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, thresholds)
 
 
-def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True):
+def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresholds, max_cuda_points=0, cuda_fallback=True, effective_max_cuda_points=None):
     # Backward-compatible alias for CUDA recluster implementation.
     return _build_recluster_pool_birch_cuda(
         logger,
@@ -430,9 +600,10 @@ def _build_recluster_pool_cuda(logger, recluster_latent, recluster_index, thresh
         thresholds,
         max_cuda_points=max_cuda_points,
         cuda_fallback=cuda_fallback,
+        effective_max_cuda_points=effective_max_cuda_points,
     )
 
-def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True):
+def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_all, minfasta, feature="no_markers", a=0.6, cluster_impl="optimized", recluster_impl="original", max_cuda_points=0, cuda_fallback=True, cluster_n_jobs=None, approximate_threshold_pruning=False):
     # Defensive normalization keeps runtime robust even under partially updated installs.
     if max_cuda_points is None:
         max_cuda_points = 0
@@ -450,14 +621,14 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         n_neighbors=min_k_1,
         mode='distance',
         p=2,
-        n_jobs=10)
+        n_jobs=_normalize_n_jobs(cluster_n_jobs))
     dist_matrix_cos = kneighbors_graph(
         latent,
         n_neighbors=min_k_1,
         mode='distance',
         metric="cosine",
         p=2,
-        n_jobs=10)
+        n_jobs=_normalize_n_jobs(cluster_n_jobs))
 
     if sort_graph_by_row_values is not None:
         dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
@@ -499,7 +670,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             minsample=5
         else:
             minsample=5
-        dbscan = DBSCAN(eps=eps_value, min_samples=minsample, n_jobs=8, metric='precomputed')
+        dbscan = DBSCAN(eps=eps_value, min_samples=minsample, n_jobs=_normalize_n_jobs(cluster_n_jobs), metric='precomputed')
         dbscan.fit(dist_matrix, sample_weight=length_weight)
         # predict the labal
         labels = dbscan.labels_
@@ -517,7 +688,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             minsample=5
         else:
             minsample=5
-        dbscan = DBSCAN(eps=eps_value, min_samples=minsample, n_jobs=8, metric='precomputed')
+        dbscan = DBSCAN(eps=eps_value, min_samples=minsample, n_jobs=_normalize_n_jobs(cluster_n_jobs), metric='precomputed')
         dbscan.fit(dist_matrix_cos, sample_weight=length_weight)
         labels = dbscan.labels_
         result_dict[eps_value] = labels.tolist()
@@ -560,14 +731,21 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     keep_count=0
     logger.info("cluster")
     remaining_bp = _get_total_bp(contig_list, contig_dict)
+    candidate_cache, contig_bp, contig_marker_counts = _build_candidate_cache(
+        resultpool,
+        contig2marker,
+        contig_all,
+        contig_dict,
+    )
+
     while remaining_bp >= minfasta:
         if len(contig_list) == 1:
             extracted.append(contig_list_index)
             break
         if feature=="no_markers":
-            max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
+            max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
         else:
-            max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
+            max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
         if not max_bin or keep_count>200:
             break
         max_bin, keep = max_bin
@@ -578,11 +756,11 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             keep_count+=1
         all_extracted.append(max_bin.copy())
         keep_label.append(keep)
-        remaining_bp -= sum(len(contig_dict[contig_all[idx]]) for idx in max_bin)
+        remaining_bp -= sum(contig_bp[idx] for idx in max_bin)
         if use_optimized:
-            _prune_resultpool_optimized(resultpool, max_bin.copy())
+            _prune_resultpool_optimized(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
         else:
-            _prune_resultpool_original(resultpool, max_bin.copy())
+            _prune_resultpool_original(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
 
     contig2ix = {}
     label_index=0
@@ -618,7 +796,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         n_neighbors=min_k_2,
         mode='distance',
         p=2,
-        n_jobs=10)
+        n_jobs=_normalize_n_jobs(cluster_n_jobs))
     if sort_graph_by_row_values is not None:
         dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
 
@@ -642,9 +820,21 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     threds.sort()
 
     if recluster_impl == "cuda":
-        recluster_impl = "birch_cuda"
+        logger.warning("recluster_impl=cuda is a legacy alias that now uses the optimized CPU BIRCH path; use birch_cuda or graph_cuda for CUDA-gated reclustering")
+        recluster_impl = "optimized"
 
     if recluster_impl == "graph_cuda":
+        effective_max_cuda_points = _resolve_cuda_point_limit(
+            logger,
+            "graph_cuda",
+            recluster_latent,
+            max_cuda_points,
+            dtype_bytes=4,
+            quadratic=True,
+        )
+        logger.info(
+            f"stage2_points={len(recluster_index)} effective_max_cuda_points={effective_max_cuda_points} builder=graph_cuda"
+        )
         cuda_resultpool = _build_recluster_pool_graph_cuda(
             logger,
             recluster_latent,
@@ -652,12 +842,24 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             threds,
             max_cuda_points=max_cuda_points,
             cuda_fallback=cuda_fallback,
+            effective_max_cuda_points=effective_max_cuda_points,
         )
         if cuda_resultpool is None:
             recluster_impl = "optimized"
         else:
             resultpool = cuda_resultpool
     elif recluster_impl == "birch_cuda":
+        effective_max_cuda_points = _resolve_cuda_point_limit(
+            logger,
+            "birch_cuda",
+            recluster_latent,
+            max_cuda_points,
+            dtype_bytes=8,
+            quadratic=False,
+        )
+        logger.info(
+            f"stage2_points={len(recluster_index)} effective_max_cuda_points={effective_max_cuda_points} builder=birch_cuda"
+        )
         cuda_resultpool = _build_recluster_pool_birch_cuda(
             logger,
             recluster_latent,
@@ -665,6 +867,7 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             threds,
             max_cuda_points=max_cuda_points,
             cuda_fallback=cuda_fallback,
+            effective_max_cuda_points=effective_max_cuda_points,
         )
         if cuda_resultpool is None:
             recluster_impl = "optimized"
@@ -672,33 +875,51 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             resultpool = cuda_resultpool
 
     if recluster_impl == "original":
+        logger.info(
+            f"stage2_points={len(recluster_index)} effective_max_cuda_points=n/a builder=original"
+        )
         resultpool = _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, threds)
     elif recluster_impl == "optimized":
-        resultpool = _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, threds)
+        logger.info(
+            f"stage2_points={len(recluster_index)} effective_max_cuda_points=n/a builder=optimized"
+        )
+        resultpool = _build_recluster_pool_birch_cpu(
+            recluster_latent,
+            recluster_index,
+            threds,
+            n_jobs=cluster_n_jobs,
+            approximate_threshold_pruning=approximate_threshold_pruning,
+        )
     if not resultpool:
         return contig_labels,keep_label
 
     minfasta = 1500
     recluster_remaining_bp = _get_total_bp(recluster_list, contig_dict)
+    candidate_cache, _, _ = _build_candidate_cache(
+        resultpool,
+        contig2marker,
+        contig_all,
+        contig_dict,
+    )
     while recluster_remaining_bp >= minfasta:
         if len(recluster_list) == 1:
             extracted.append(recluster_index)
             break
 
         if feature=="no_markers":
-            max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
+            max_bin = get_bin_best(model2, model1, resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
         else:
-            max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a)
+            max_bin = get_bin_best_markers(model2, model1, vectorizer, tfidf_transformer,resultpool, contig2marker, contig_all, contig_dict, minfasta,a, candidate_cache=candidate_cache)
         if not max_bin:
             break
         max_bin, keep = max_bin
 
         extracted.append(max_bin.copy())
-        recluster_remaining_bp -= sum(len(contig_dict[contig_all[idx]]) for idx in max_bin)
+        recluster_remaining_bp -= sum(contig_bp[idx] for idx in max_bin)
         if use_recluster_optimized:
-            _prune_resultpool_optimized(resultpool, max_bin.copy())
+            _prune_resultpool_optimized(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
         else:
-            _prune_resultpool_original(resultpool, max_bin.copy())
+            _prune_resultpool_original(resultpool, max_bin.copy(), candidate_cache=candidate_cache, contig_bp=contig_bp, contig_marker_counts=contig_marker_counts)
     contig2ix = {}
     for i, cs in enumerate(extracted):
         for c in cs:
