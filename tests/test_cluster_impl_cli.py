@@ -55,6 +55,27 @@ def test_bin_recluster_impl_optimized(monkeypatch):
     assert args.recluster_impl == "optimized"
 
 
+def test_bin_recluster_impl_optimized_2(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "LorBin",
+            "bin",
+            "-o",
+            "out",
+            "-fa",
+            "input.fa",
+            "-b",
+            "input.bam",
+            "--recluster_impl",
+            "optimized_2",
+        ],
+    )
+    args = parser_args()
+    assert args.recluster_impl == "optimized_2"
+
+
 def test_bin_recluster_impl_original_default(monkeypatch):
     monkeypatch.setattr(
         sys,

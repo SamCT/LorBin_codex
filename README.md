@@ -100,6 +100,7 @@ LorBin bin -o outputdir -fa test.fna -b test1.mapped.sorted.bam test2.mapped.sor
 If you only want to use LorBin in single mode,
 ```angular2html
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized_2
 
 # experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
@@ -111,6 +112,7 @@ LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --cluster_impl or
 
 # keep stage-1 default, enable optimized reclustering
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized
+LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl optimized_2
 
 # experimental: CUDA-accelerated recluster candidate generation (falls back to CPU if CUDA is unavailable)
 LorBin bin -o outputdir -fa test.fna -b test.mapped.sorted.bam --recluster_impl cuda
@@ -137,8 +139,8 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
+  --recluster_impl {optimized,optimized_2,original,cuda,birch_cuda,graph_cuda}
+                        Stage-2 reclustering implementation to run (default: original; optimized_2 adds bounded stage-2 search and scale-aware BIRCH thresholds; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
 ```
 ### Only generate data
 If you only need the kmer and abundance data, you can use subcommand 'generate_data'.
@@ -205,8 +207,8 @@ options:
   --multi               Cluster uses more samples
   --cluster_impl {optimized,original}
                         Stage-1 clustering implementation to run (default: optimized)
-  --recluster_impl {optimized,original,cuda,birch_cuda,graph_cuda}
-                        Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
+  --recluster_impl {optimized,optimized_2,original,cuda,birch_cuda,graph_cuda}
+                        Stage-2 reclustering implementation to run (default: original; optimized_2 adds bounded stage-2 search and scale-aware BIRCH thresholds; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)
   --embeddingdir EMBEDDINGDIR, -e EMBEDDINGDIR
                         The path of embedding csv file used in clustering
   --threads THREADS, --num_process THREADS

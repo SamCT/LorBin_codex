@@ -222,8 +222,8 @@ def parser_args():
         p.add_argument('--multi',action='store_true', default=False, help='Cluster uses more samples')
         p.add_argument('--cluster_impl', choices=['optimized', 'original'], default='optimized',
                       help='Stage-1 clustering implementation to run (default: optimized)')
-        p.add_argument('--recluster_impl', choices=['optimized', 'original', 'cuda', 'graph_cuda', 'birch_cuda'], default='original',
-                      help='Stage-2 reclustering implementation to run (default: original; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)')
+        p.add_argument('--recluster_impl', choices=['optimized', 'optimized_2', 'original', 'cuda', 'graph_cuda', 'birch_cuda'], default='original',
+                      help='Stage-2 reclustering implementation to run (default: original; optimized_2 adds bounded stage-2 search and scale-aware BIRCH thresholds; cuda/birch_cuda/graph_cuda require CUDA-capable PyTorch)')
         p.add_argument('--max_cuda_points', type=int, default=0,
                       help='Max contigs for CUDA recluster (0=auto from GPU VRAM; default: 0)')
         p.add_argument('--disable_cuda_fallback', action='store_true', default=False,
