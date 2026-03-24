@@ -28,6 +28,25 @@ warnings.filterwarnings(
     message="Precomputed sparse input was not sorted by row values.*",
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _summarize_thresholds(thresholds, preview=5):
+    values = list(thresholds)
+    if not values:
+        return "count=0"
+    head = values[:preview]
+    tail = values[-preview:] if len(values) > preview else []
+    summary = [
+        f"count={len(values)}",
+        f"min={values[0]:.6f}",
+        f"max={values[-1]:.6f}",
+        f"head={head}",
+    ]
+    if tail:
+        summary.append(f"tail={tail}")
+    return ", ".join(summary)
+
 
 def _normalize_n_jobs(n_jobs):
     if n_jobs is None:
@@ -355,6 +374,15 @@ def _prepare_thresholds(thresholds, approximate_pruning=False, relative_toleranc
     return pruned
 
 
+def _dedupe_resultpool_original_semantics(resultpool):
+    # Match the original stage-2 behavior:
+    # - keep singleton pools
+    # - do not sort component members
+    # - dedupe once at the end with the same tuple key
+    unique_resultpool = set(map(tuple, resultpool))
+    return list(map(list, unique_resultpool))
+
+
 def _dedupe_resultpool(resultpool):
     if not resultpool:
         return []
@@ -417,6 +445,77 @@ def _build_recluster_pool_birch_cpu(recluster_latent, recluster_index, threshold
         if pending:
             extend_with_candidate_batches([future.result() for future in pending])
     return _dedupe_resultpool(resultpool)
+
+
+def _build_recluster_pool_birch_cpu_equivalent(recluster_latent, recluster_index, thresholds, n_jobs=None):
+    # Faster wall-clock, but preserve original stage-2 candidate semantics.
+    input_thresholds = list(thresholds)
+    prepared_thresholds = [t for t in input_thresholds if t >= 0.00001]
+    logger.info(
+        "stage2 optimized-equivalent thresholds: input_%s filtered_%s",
+        _summarize_thresholds(input_thresholds),
+        _summarize_thresholds(prepared_thresholds),
+    )
+    if not prepared_thresholds:
+        logger.info("stage2 optimized-equivalent builder skipped: no thresholds >= 1e-5")
+        return []
+
+    max_workers = _effective_worker_count(n_jobs, len(prepared_thresholds))
+    logger.info(
+        "stage2 optimized-equivalent execution: points=%d thresholds=%d workers=%d",
+        len(recluster_index),
+        len(prepared_thresholds),
+        max_workers,
+    )
+    resultpool = []
+
+    if max_workers == 1:
+        for threshold in prepared_thresholds:
+            batch = _birch_result_for_threshold(threshold, recluster_latent, recluster_index)
+            logger.info(
+                "stage2 optimized-equivalent threshold %.6f produced %d candidate pools",
+                threshold,
+                len(batch),
+            )
+            resultpool.extend(batch)
+        deduped = _dedupe_resultpool_original_semantics(resultpool)
+        logger.info(
+            "stage2 optimized-equivalent dedupe: raw_candidates=%d deduped_candidates=%d",
+            len(resultpool),
+            len(deduped),
+        )
+        return deduped
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            (
+                threshold,
+                executor.submit(
+                    _birch_result_for_threshold,
+                    threshold,
+                    recluster_latent,
+                    recluster_index,
+                ),
+            )
+            for threshold in prepared_thresholds
+        ]
+        # Collect in submission order so threshold order stays the same.
+        for threshold, future in futures:
+            batch = future.result()
+            logger.info(
+                "stage2 optimized-equivalent threshold %.6f produced %d candidate pools",
+                threshold,
+                len(batch),
+            )
+            resultpool.extend(batch)
+
+    deduped = _dedupe_resultpool_original_semantics(resultpool)
+    logger.info(
+        "stage2 optimized-equivalent dedupe: raw_candidates=%d deduped_candidates=%d",
+        len(resultpool),
+        len(deduped),
+    )
+    return deduped
 
 
 def _build_recluster_pool_birch_cpu_original(recluster_latent, recluster_index, thresholds):
@@ -921,6 +1020,12 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
     if not threds:
         return contig_labels,keep_label
 
+    logger.info(
+        "stage2 threshold summary: impl=%s %s",
+        recluster_impl,
+        _summarize_thresholds(threds),
+    )
+
     if recluster_impl == "cuda":
         logger.warning("recluster_impl=cuda is a legacy alias that now uses the optimized CPU BIRCH path; use birch_cuda or graph_cuda for CUDA-gated reclustering")
         recluster_impl = "optimized"
@@ -985,12 +1090,11 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
         logger.info(
             f"stage2_points={len(recluster_index)} effective_max_cuda_points=n/a builder=optimized"
         )
-        resultpool = _build_recluster_pool_birch_cpu(
+        resultpool = _build_recluster_pool_birch_cpu_equivalent(
             recluster_latent,
             recluster_index,
             threds,
             n_jobs=cluster_n_jobs,
-            approximate_threshold_pruning=approximate_threshold_pruning,
         )
     elif recluster_impl == "optimized_2":
         logger.info(
@@ -1003,6 +1107,11 @@ def bin_cluster(logger, latent, contig2marker, contig_dict, contig_list, contig_
             n_jobs=cluster_n_jobs,
             approximate_threshold_pruning=True,
         )
+    logger.info(
+        "stage2 resultpool summary: impl=%s candidate_pools=%d",
+        recluster_impl,
+        len(resultpool),
+    )
     if not resultpool:
         return contig_labels,keep_label
 
